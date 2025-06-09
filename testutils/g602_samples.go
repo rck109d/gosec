@@ -387,4 +387,57 @@ func foo(s []int) {
 	}
 }
 `}, 3, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 1 {
+		s[0]++
+		fmt.Println(s[0])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 1 {
+		return
+	}
+	s[0]++
+	fmt.Println(s[0])
+}
+`}, 0, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 1 {
+		return
+	}
+	s[1]++
+	fmt.Println(s[1])
+}
+`}, 3, gosec.NewConfig()},
 }
