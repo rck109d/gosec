@@ -447,7 +447,6 @@ func extractSliceCapFromAlloc(instr string) (int, error) {
 	return 0, errors.New("no slice cap found")
 }
 
-// isSliceType checks if the given type is a slice type
 func isSliceType(t types.Type) bool {
 	_, ok := t.(*types.Slice)
 	return ok
