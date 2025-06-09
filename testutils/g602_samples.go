@@ -279,10 +279,10 @@ package main
 import "fmt"
 
 func main() {
-s := make([]byte, 2)
-fmt.Println(s[1])
-s = make([]byte, 0)
-fmt.Println(s[1])
+	s := make([]byte, 2)
+	fmt.Println(s[1])
+	s = make([]byte, 0)
+	fmt.Println(s[1])
 }
 `}, 1, gosec.NewConfig()},
 	{[]string{`
@@ -370,4 +370,21 @@ func foo(s []int) {
 	}
 }
 `}, 0, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) > 0 {
+		s[1]++
+		fmt.Println(s[1])
+	}
+}
+`}, 0, gosec.NewConfig()}, // TODO: Should be 3 violations - conditional logic bug with parameters
 }
