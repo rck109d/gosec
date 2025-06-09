@@ -72,96 +72,63 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 					if allocRefs == nil {
 						break
 					}
-					for _, instr := range *allocRefs {
-						if slice, ok := instr.(*ssa.Slice); ok {
-							if _, ok := slice.X.(*ssa.Alloc); ok {
-								if slice.Parent() != nil {
-									l, h := extractSliceBounds(slice)
-									newCap := computeSliceNewCap(l, h, sliceCap)
-									violations := []ssa.Instruction{}
-									trackSliceBounds(0, newCap, slice, &violations, ifs)
-									for _, s := range violations {
-										switch s := s.(type) {
-										case *ssa.Slice:
-											issue := newIssue(
-												pass.Analyzer.Name,
-												"slice bounds out of range",
-												pass.Fset,
-												s.Pos(),
-												issue.Low,
-												issue.High)
-											issues[s] = issue
-										case *ssa.IndexAddr:
-											issue := newIssue(
-												pass.Analyzer.Name,
-												"slice index out of range",
-												pass.Fset,
-												s.Pos(),
-												issue.Low,
-												issue.High)
-											issues[s] = issue
-										}
-									}
+					processAllocSlice := func(slice *ssa.Slice, nodeToTrack ssa.Node) {
+						if _, ok := slice.X.(*ssa.Alloc); ok && slice.Parent() != nil {
+							l, h := extractSliceBounds(slice)
+							newCap := computeSliceNewCap(l, h, sliceCap)
+							violations := []ssa.Instruction{}
+							trackSliceBounds(0, newCap, nodeToTrack, &violations, ifs)
+							for _, s := range violations {
+								switch s := s.(type) {
+								case *ssa.Slice:
+									issue := newIssue(
+										pass.Analyzer.Name,
+										"slice bounds out of range",
+										pass.Fset,
+										s.Pos(),
+										issue.Low,
+										issue.High)
+									issues[s] = issue
+								case *ssa.IndexAddr:
+									issue := newIssue(
+										pass.Analyzer.Name,
+										"slice index out of range",
+										pass.Fset,
+										s.Pos(),
+										issue.Low,
+										issue.High)
+									issues[s] = issue
 								}
 							}
 						}
-						// Also handle ChangeType instructions that reference slices from allocations
-						if changeType, ok := instr.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
+					}
+
+					for _, refInstr := range *allocRefs {
+						// Check direct slice
+						if slice, ok := refInstr.(*ssa.Slice); ok {
+							processAllocSlice(slice, slice)
+						}
+						// Check ChangeType wrapping slice
+						if changeType, ok := refInstr.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
 							if slice, ok := changeType.X.(*ssa.Slice); ok {
-								if _, ok := slice.X.(*ssa.Alloc); ok {
-									if slice.Parent() != nil {
-										l, h := extractSliceBounds(slice)
-										newCap := computeSliceNewCap(l, h, sliceCap)
-										violations := []ssa.Instruction{}
-										trackSliceBounds(0, newCap, changeType, &violations, ifs)
-										for _, s := range violations {
-											switch s := s.(type) {
-											case *ssa.Slice:
-												issue := newIssue(
-													pass.Analyzer.Name,
-													"slice bounds out of range",
-													pass.Fset,
-													s.Pos(),
-													issue.Low,
-													issue.High)
-												issues[s] = issue
-											case *ssa.IndexAddr:
-												issue := newIssue(
-													pass.Analyzer.Name,
-													"slice index out of range",
-													pass.Fset,
-													s.Pos(),
-													issue.Low,
-													issue.High)
-												issues[s] = issue
-											}
-										}
-									}
-								}
+								processAllocSlice(slice, changeType)
 							}
 						}
 					}
 				case *ssa.IndexAddr:
-					// Check for direct parameter access without length validation
-					if param, ok := instr.X.(*ssa.Parameter); ok && isSliceType(param.Type()) {
-						// Track bounds for parameter slices to detect length conditions
-						violations := []ssa.Instruction{}
-						trackSliceBounds(0, -1, param, &violations, ifs) // -1 means unknown capacity
-						issue := newIssue(
-							pass.Analyzer.Name,
-							"slice index out of range",
-							pass.Fset,
-							instr.Pos(),
-							issue.Low,
-							issue.High)
-						issues[instr] = issue
+					// Unwrap ChangeType if present to get the underlying slice source
+					sliceSource := instr.X
+					if changeType, ok := sliceSource.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
+						sliceSource = changeType.X
 					}
-					// Check for named slice types (generates ChangeType instructions)
-					if changeType, ok := instr.X.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
-						// Only flag if the underlying value would be unsafe
-						// If it's changing from an alloc, it should be handled by the allocation tracking
-						// If it's changing from a parameter, it should be flagged like parameters
-						if param, ok := changeType.X.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+
+					// Check if the slice source is a parameter slice
+					if param, ok := sliceSource.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+						// Skip if this appears to be a range loop (simple heuristic)
+						if !isLikelyRangeLoop(param) {
+							// Track bounds for parameter slices to detect length conditions
+							violations := []ssa.Instruction{}
+							trackSliceBounds(0, -1, param, &violations, ifs) // -1 means unknown capacity
 							issue := newIssue(
 								pass.Analyzer.Name,
 								"slice index out of range",
@@ -171,7 +138,6 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 								issue.High)
 							issues[instr] = issue
 						}
-						// For other cases (like from alloc), let the existing tracking handle it
 					}
 				}
 			}
@@ -527,4 +493,39 @@ func isSliceType(t types.Type) bool {
 	}
 
 	return false
+}
+
+// isLikelyRangeLoop uses simple heuristics to detect if a parameter slice is used in a range loop
+func isLikelyRangeLoop(param *ssa.Parameter) bool {
+	fn := param.Parent()
+	if fn == nil {
+		return false
+	}
+
+	// Simple heuristic: if function has len(param) call and phi with #rangeindex, likely a range loop
+	hasLenCall := false
+	hasRangeIndex := false
+
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			// Check for len(param) call
+			if call, ok := instr.(*ssa.Call); ok {
+				if builtin, ok := call.Call.Value.(*ssa.Builtin); ok {
+					if builtin.Name() == "len" && len(call.Call.Args) > 0 {
+						if call.Call.Args[0] == param {
+							hasLenCall = true
+						}
+					}
+				}
+			}
+			// Check for range index phi
+			if phi, ok := instr.(*ssa.Phi); ok {
+				if strings.Contains(phi.String(), "#rangeindex") {
+					hasRangeIndex = true
+				}
+			}
+		}
+	}
+
+	return hasLenCall && hasRangeIndex
 }

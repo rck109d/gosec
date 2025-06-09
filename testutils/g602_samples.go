@@ -1085,4 +1085,49 @@ func f(s MySlice) {
 	fmt.Println(s[2]) // unsafe - need len >= 3 for s[2]
 }
 `}, 1, gosec.NewConfig()},
+	// Range statement should NOT trigger slice index out of range
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5)
+	for i, v := range s {
+		fmt.Println(i, v)
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Range statement on parameter slice should NOT trigger slice index out of range
+	{[]string{`
+package main
+
+import "fmt"
+
+func processSlice(s []int) {
+	for _, v := range s {
+		fmt.Println(v)
+	}
+}
+
+func main() {
+	s := make([]int, 5)
+	processSlice(s)
+}
+`}, 0, gosec.NewConfig()},
+	// Range statement on named slice type should NOT trigger slice index out of range
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make(MySlice, 5)
+	for _, v := range s {
+		fmt.Println(v)
+	}
+}
+`}, 0, gosec.NewConfig()},
 }
