@@ -373,7 +373,7 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 			case token.GTR:
 				return upperUnbounded, value, nil
 			case token.GEQ:
-				return upperUnbounded, value + 1, nil
+				return upperUnbounded, value - 1, nil
 			case token.EQL:
 				return upperBounded, value, nil
 			case token.NEQ:

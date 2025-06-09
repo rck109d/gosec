@@ -632,4 +632,76 @@ func foo(s []int) {
 	fmt.Println(s[2])
 }
 `}, 0, gosec.NewConfig()},
+	// foo, GTE boundary OK - len(s) >= 3 means s[2] is safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) >= 3 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// foo, GTE boundary ERROR - len(s) >= 2 means s[2] is NOT safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) >= 2 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, GTE boundary-1 ERROR - len(s) >= 1 means s[2] is NOT safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) >= 1 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, GTE boundary+1 OK - len(s) >= 4 means s[2] is safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) >= 4 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
 }
