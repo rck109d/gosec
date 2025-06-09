@@ -128,9 +128,14 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 		if err != nil {
 			continue
 		}
+		originalBound := bound
 		for i, block := range ifref.Block().Succs {
 			if i == 1 {
 				bound = invBound(bound)
+				// Adjust value for inverted lowerUnbounded (len(s) < N -> len(s) >= N)
+				if originalBound == lowerUnbounded {
+					value = value - 1
+				}
 			}
 			var processBlock func(block *ssa.BasicBlock, depth int)
 			processBlock = func(block *ssa.BasicBlock, depth int) {
