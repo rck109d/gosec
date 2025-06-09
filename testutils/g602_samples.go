@@ -704,4 +704,243 @@ func foo(s []int) {
 	}
 }
 `}, 0, gosec.NewConfig()},
+	// Left-hand constant: 3 < len(s) means s[2] is safe (same as len(s) > 3)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 3 < len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 2 < len(s) means s[2] is safe (same as len(s) > 2, means len >= 3)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 2 < len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 1 < len(s) means s[2] is NOT safe (same as len(s) > 1, means len >= 2)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 1 < len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// Left-hand constant: 3 <= len(s) means s[2] is safe (same as len(s) >= 3)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 3 <= len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 2 <= len(s) means s[2] is NOT safe (same as len(s) >= 2)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 2 <= len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// Left-hand constant: 3 > len(s) means len(s) < 3, early return should make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 3 > len(s) {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 2 > len(s) means len(s) < 2, early return should NOT make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 2 > len(s) {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 3, gosec.NewConfig()},
+	// Left-hand constant: 3 >= len(s) means len(s) <= 3, early return should make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 3 >= len(s) {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 2 >= len(s) means len(s) <= 2, early return SHOULD make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 2 >= len(s) {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 1 >= len(s) means len(s) <= 1, early return should NOT make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 1 >= len(s) {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 3, gosec.NewConfig()},
+	// Left-hand constant: 3 == len(s), guarded access should make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 3 == len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Left-hand constant: 2 == len(s), guarded access should NOT make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 2 == len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// Left-hand constant: 1 == len(s), guarded access should NOT make s[2] safe
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if 1 == len(s) {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
 }
