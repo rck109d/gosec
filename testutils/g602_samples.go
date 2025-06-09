@@ -943,4 +943,146 @@ func foo(s []int) {
 	}
 }
 `}, 3, gosec.NewConfig()},
+	// Named slice type - should catch out of bounds access
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	fmt.Println(s[6]) // out of bounds
+}
+`}, 1, gosec.NewConfig()},
+	// Named slice type - should be safe
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	fmt.Println(s[4]) // safe
+}
+`}, 0, gosec.NewConfig()},
+	// Named slice type as parameter - should catch out of bounds without length check
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	f(s)
+}
+
+func f(s MySlice) {
+	fmt.Println(s[10]) // potential out of bounds
+}
+`}, 1, gosec.NewConfig()},
+	// Named slice type as parameter - should be safe with length check
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	f(s)
+}
+
+func f(s MySlice) {
+	if len(s) > 10 {
+		fmt.Println(s[10]) // safe with length check
+	}
+}
+`}, 0, gosec.NewConfig()},
+	// Named slice type - slice operations
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	fmt.Println(s[:6]) // out of bounds slice
+}
+`}, 1, gosec.NewConfig()},
+	// Named slice type - safe slice operations
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	fmt.Println(s[:5]) // safe slice
+}
+`}, 0, gosec.NewConfig()},
+	// Multiple levels of named types
+	{[]string{`
+package main
+
+import "fmt"
+
+type BaseSlice []int
+type MySlice BaseSlice
+
+func main() {
+	var s MySlice = make([]int, 3)
+	fmt.Println(s[5]) // out of bounds
+}
+`}, 1, gosec.NewConfig()},
+	// Named slice type with length validation - early return pattern
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	f(s)
+}
+
+func f(s MySlice) {
+	if len(s) < 3 {
+		return
+	}
+	fmt.Println(s[2]) // safe after length check
+}
+`}, 0, gosec.NewConfig()},
+	// Named slice type with insufficient length validation
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 5)
+	f(s)
+}
+
+func f(s MySlice) {
+	if len(s) < 2 {
+		return
+	}
+	fmt.Println(s[2]) // unsafe - need len >= 3 for s[2]
+}
+`}, 1, gosec.NewConfig()},
 }

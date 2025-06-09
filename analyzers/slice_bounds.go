@@ -105,10 +105,48 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 								}
 							}
 						}
+						// Also handle ChangeType instructions that reference slices from allocations
+						if changeType, ok := instr.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
+							if slice, ok := changeType.X.(*ssa.Slice); ok {
+								if _, ok := slice.X.(*ssa.Alloc); ok {
+									if slice.Parent() != nil {
+										l, h := extractSliceBounds(slice)
+										newCap := computeSliceNewCap(l, h, sliceCap)
+										violations := []ssa.Instruction{}
+										trackSliceBounds(0, newCap, changeType, &violations, ifs)
+										for _, s := range violations {
+											switch s := s.(type) {
+											case *ssa.Slice:
+												issue := newIssue(
+													pass.Analyzer.Name,
+													"slice bounds out of range",
+													pass.Fset,
+													s.Pos(),
+													issue.Low,
+													issue.High)
+												issues[s] = issue
+											case *ssa.IndexAddr:
+												issue := newIssue(
+													pass.Analyzer.Name,
+													"slice index out of range",
+													pass.Fset,
+													s.Pos(),
+													issue.Low,
+													issue.High)
+												issues[s] = issue
+											}
+										}
+									}
+								}
+							}
+						}
 					}
 				case *ssa.IndexAddr:
 					// Check for direct parameter access without length validation
 					if param, ok := instr.X.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+						// Track bounds for parameter slices to detect length conditions
+						violations := []ssa.Instruction{}
+						trackSliceBounds(0, -1, param, &violations, ifs) // -1 means unknown capacity
 						issue := newIssue(
 							pass.Analyzer.Name,
 							"slice index out of range",
@@ -117,6 +155,23 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 							issue.Low,
 							issue.High)
 						issues[instr] = issue
+					}
+					// Check for named slice types (generates ChangeType instructions)
+					if changeType, ok := instr.X.(*ssa.ChangeType); ok && isSliceType(changeType.Type()) {
+						// Only flag if the underlying value would be unsafe
+						// If it's changing from an alloc, it should be handled by the allocation tracking
+						// If it's changing from a parameter, it should be flagged like parameters
+						if param, ok := changeType.X.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+							issue := newIssue(
+								pass.Analyzer.Name,
+								"slice index out of range",
+								pass.Fset,
+								instr.Pos(),
+								issue.Low,
+								issue.High)
+							issues[instr] = issue
+						}
+						// For other cases (like from alloc), let the existing tracking handle it
 					}
 				}
 			}
@@ -150,7 +205,15 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 							break
 						case upperUnbounded, unbounded:
 							if tinstr, ok := instr.(*ssa.IndexAddr); ok {
+								// Handle parameter slices
 								if _, ok := tinstr.X.(*ssa.Parameter); ok {
+									indexValue, err := extractIntValue(tinstr.Index.String())
+									if err != nil || indexValue > value {
+										break // problem found, do not delete issue
+									}
+								}
+								// Handle named slice types (ChangeType)
+								if _, ok := tinstr.X.(*ssa.ChangeType); ok {
 									indexValue, err := extractIntValue(tinstr.Index.String())
 									if err != nil || indexValue > value {
 										break // problem found, do not delete issue
@@ -223,6 +286,11 @@ func trackSliceBounds(depth int, sliceCap int, slice ssa.Node, violations *[]ssa
 				indexValue, err := extractIntValue(refinstr.Index.String())
 				if err == nil && !isSliceIndexInsideBounds(0, sliceCap, indexValue) {
 					*violations = append(*violations, refinstr)
+				}
+			case *ssa.ChangeType:
+				// Handle named slice types - track bounds through the ChangeType
+				if isSliceType(refinstr.Type()) {
+					trackSliceBounds(depth, sliceCap, refinstr, violations, ifs)
 				}
 			case *ssa.Call:
 				if ifref, cond := extractSliceIfLenCondition(refinstr); ifref != nil && cond != nil {
@@ -448,6 +516,15 @@ func extractSliceCapFromAlloc(instr string) (int, error) {
 }
 
 func isSliceType(t types.Type) bool {
-	_, ok := t.(*types.Slice)
-	return ok
+	if _, ok := t.(*types.Slice); ok {
+		return true
+	}
+
+	if named, ok := t.(*types.Named); ok {
+		if _, ok := named.Underlying().(*types.Slice); ok {
+			return true
+		}
+	}
+
+	return false
 }
