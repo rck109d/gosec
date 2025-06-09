@@ -338,4 +338,36 @@ func main() {
 }
 
 `}, 0, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	s[0]++
+	fmt.Println(s[0])
+}
+`}, 2, gosec.NewConfig()},
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) > 0 {
+		s[0]++
+		fmt.Println(s[0])
+	}
+}
+`}, 0, gosec.NewConfig()},
 }

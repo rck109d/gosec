@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"go/token"
+	"go/types"
 	"regexp"
 	"strconv"
 	"strings"
@@ -56,7 +57,9 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 	}
 
 	issues := map[ssa.Instruction]*issue.Issue{}
+	issuesByPos := map[token.Pos]bool{} // Track positions to avoid duplicates
 	ifs := map[ssa.If]*ssa.BinOp{}
+
 	for _, mcall := range ssaResult.SSA.SrcFuncs {
 		for _, block := range mcall.DomPreorder() {
 			for _, instr := range block.Instrs {
@@ -79,6 +82,12 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 									violations := []ssa.Instruction{}
 									trackSliceBounds(0, newCap, slice, &violations, ifs)
 									for _, s := range violations {
+										// Skip if we already have an issue at this position
+										if issuesByPos[s.Pos()] {
+											continue
+										}
+										issuesByPos[s.Pos()] = true
+
 										switch s := s.(type) {
 										case *ssa.Slice:
 											issue := newIssue(
@@ -103,6 +112,24 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 								}
 							}
 						}
+					}
+				case *ssa.IndexAddr:
+					// Check for direct parameter access without length validation
+					if param, ok := instr.X.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+						// Skip if we already have an issue at this position
+						if issuesByPos[instr.Pos()] {
+							break
+						}
+						issuesByPos[instr.Pos()] = true
+
+						issue := newIssue(
+							pass.Analyzer.Name,
+							"slice index out of range",
+							pass.Fset,
+							instr.Pos(),
+							issue.Low,
+							issue.High)
+						issues[instr] = issue
 					}
 				}
 			}
@@ -143,7 +170,7 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 								if err != nil {
 									break
 								}
-								if isSliceIndexInsideBounds(0, value, indexValue) {
+								if isSliceIndexInsideBoundsWithLenCheck(0, -1, indexValue, value) {
 									delete(issues, instr)
 								}
 							}
@@ -178,6 +205,7 @@ func trackSliceBounds(depth int, sliceCap int, slice ssa.Node, violations *[]ssa
 	if violations == nil {
 		violations = &[]ssa.Instruction{}
 	}
+
 	referrers := slice.Referrers()
 	if referrers != nil {
 		for _, refinstr := range *referrers {
@@ -276,6 +304,10 @@ func extractSliceIfLenCondition(call *ssa.Call) (*ssa.If, *ssa.BinOp) {
 }
 
 func computeSliceNewCap(l, h, oldCap int) int {
+	// If oldCap is -1 (unknown), derived slices are also unknown
+	if oldCap == -1 {
+		return -1
+	}
 	if l == 0 && h == 0 {
 		return oldCap
 	}
@@ -344,10 +376,27 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 }
 
 func isSliceIndexInsideBounds(l, h int, index int) bool {
+	// If h is -1, it means unknown capacity - we can't determine bounds
+	if h == -1 {
+		return false // Conservative approach: assume out of bounds for unknown capacity
+	}
 	return (l <= index && index < h)
 }
 
+// isSliceIndexInsideBoundsWithLenCheck handles bounds checking for slices with potential length validation
+func isSliceIndexInsideBoundsWithLenCheck(l, h int, index int, lenCheckValue int) bool {
+	// If h is -1 (unknown capacity) but we have a length check, use the length check value
+	if h == -1 && lenCheckValue > 0 {
+		return (l <= index && index < lenCheckValue)
+	}
+	return isSliceIndexInsideBounds(l, h, index)
+}
+
 func isSliceInsideBounds(l, h int, cl, ch int) bool {
+	// If h is -1, it means unknown capacity - we can't determine bounds
+	if h == -1 {
+		return false // Conservative approach: assume out of bounds for unknown capacity
+	}
 	return (l <= cl && h >= ch) && (l <= ch && h >= cl)
 }
 
@@ -396,4 +445,10 @@ func extractSliceCapFromAlloc(instr string) (int, error) {
 	}
 
 	return 0, errors.New("no slice cap found")
+}
+
+// isSliceType checks if the given type is a slice type
+func isSliceType(t types.Type) bool {
+	_, ok := t.(*types.Slice)
+	return ok
 }
