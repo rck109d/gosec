@@ -352,7 +352,7 @@ func foo(s []int) {
 	s[0]++
 	fmt.Println(s[0])
 }
-`}, 2, gosec.NewConfig()},
+`}, 3, gosec.NewConfig()},
 	{[]string{`
 package main
 
