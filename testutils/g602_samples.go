@@ -338,6 +338,7 @@ func main() {
 }
 
 `}, 0, gosec.NewConfig()},
+	// foo, unchecked errors
 	{[]string{`
 package main
 
@@ -352,6 +353,7 @@ func foo(s []int) {
 	s[0]++
 	fmt.Println(s[0])
 }
+// foo, if GT at boundary OK
 `}, 3, gosec.NewConfig()},
 	{[]string{`
 package main
@@ -364,12 +366,31 @@ func main() {
 }
 
 func foo(s []int) {
-	if len(s) > 0 {
-		s[0]++
-		fmt.Println(s[0])
+	if len(s) > 2 {
+		s[2]++
+		fmt.Println(s[2])
 	}
 }
 `}, 0, gosec.NewConfig()},
+	// foo, if GT at boundary-1 ERROR
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) > 1 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, if GT at boundary-2, ERROR
 	{[]string{`
 package main
 
@@ -382,11 +403,30 @@ func main() {
 
 func foo(s []int) {
 	if len(s) > 0 {
-		s[1]++
-		fmt.Println(s[1])
+		s[2]++
+		fmt.Println(s[2])
 	}
 }
 `}, 3, gosec.NewConfig()},
+	// foo, if LT error
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 0 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, if LT error
 	{[]string{`
 package main
 
@@ -399,11 +439,85 @@ func main() {
 
 func foo(s []int) {
 	if len(s) < 1 {
-		s[0]++
-		fmt.Println(s[0])
+		s[2]++
+		fmt.Println(s[2])
 	}
 }
 `}, 3, gosec.NewConfig()},
+	// foo, if LT error
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 2 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, if LT error
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 3 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, if LT error
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 3 {
+		s[2]++
+		fmt.Println(s[2])
+	}
+}
+`}, 3, gosec.NewConfig()},
+	// foo, early return IF LT boundary ERROR
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 2 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 3, gosec.NewConfig()},
+	// foo, early return IF LT boundary-1 ERROR
 	{[]string{`
 package main
 
@@ -418,10 +532,11 @@ func foo(s []int) {
 	if len(s) < 1 {
 		return
 	}
-	s[0]++
-	fmt.Println(s[0])
+	s[2]++
+	fmt.Println(s[2])
 }
-`}, 0, gosec.NewConfig()},
+`}, 3, gosec.NewConfig()},
+	// foo, early return IF LT boundary+1 OK
 	{[]string{`
 package main
 
@@ -433,11 +548,106 @@ func main() {
 }
 
 func foo(s []int) {
-	if len(s) < 1 {
+	if len(s) < 3 {
 		return
 	}
-	s[1]++
-	fmt.Println(s[1])
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// foo, early return IF LT boundary+2 OK
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) < 4 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// foo, early return if LTE boundary OK
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) <= 2 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// foo, early return if LTE boundary-1 ERROR
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) <= 1 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
 }
 `}, 3, gosec.NewConfig()},
+	// foo, early return if LTE boundary+1 OK
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) <= 3 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
+	// foo, early return if LTE boundary+2 OK
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	foo(s)
+}
+
+func foo(s []int) {
+	if len(s) <= 4 {
+		return
+	}
+	s[2]++
+	fmt.Println(s[2])
+}
+`}, 0, gosec.NewConfig()},
 }
