@@ -344,10 +344,14 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 				return lowerUnbounded, value, err
 			}
 			switch binop.Op {
-			case token.LSS, token.LEQ:
+			case token.LSS:
 				return upperUnbounded, value, nil
-			case token.GTR, token.GEQ:
+			case token.LEQ:
+				return upperUnbounded, value + 1, nil
+			case token.GTR:
 				return lowerUnbounded, value, nil
+			case token.GEQ:
+				return lowerUnbounded, value - 1, nil
 			case token.EQL:
 				return upperBounded, value, nil
 			case token.NEQ:
@@ -362,10 +366,14 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 				return lowerUnbounded, value, err
 			}
 			switch binop.Op {
-			case token.LSS, token.LEQ:
+			case token.LSS:
 				return lowerUnbounded, value, nil
-			case token.GTR, token.GEQ:
+			case token.LEQ:
+				return lowerUnbounded, value + 1, nil
+			case token.GTR:
 				return upperUnbounded, value, nil
+			case token.GEQ:
+				return upperUnbounded, value + 1, nil
 			case token.EQL:
 				return upperBounded, value, nil
 			case token.NEQ:

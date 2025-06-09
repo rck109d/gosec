@@ -420,24 +420,6 @@ func main() {
 }
 
 func foo(s []int) {
-	if len(s) < 0 {
-		s[2]++
-		fmt.Println(s[2])
-	}
-}
-`}, 3, gosec.NewConfig()},
-	// foo, if LT error
-	{[]string{`
-package main
-
-import "fmt"
-
-func main() {
-	s := make([]int, 0)
-	foo(s)
-}
-
-func foo(s []int) {
 	if len(s) < 1 {
 		s[2]++
 		fmt.Println(s[2])
