@@ -144,6 +144,14 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 						case lowerUnbounded:
 							break
 						case upperUnbounded, unbounded:
+							if tinstr, ok := instr.(*ssa.IndexAddr); ok {
+								if _, ok := tinstr.X.(*ssa.Parameter); ok {
+									indexValue, err := extractIntValue(tinstr.Index.String())
+									if err != nil || indexValue > value {
+										break // problem found, do not delete issue
+									}
+								}
+							}
 							delete(issues, instr)
 						case upperBounded:
 							switch tinstr := instr.(type) {

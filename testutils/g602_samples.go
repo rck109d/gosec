@@ -386,5 +386,5 @@ func foo(s []int) {
 		fmt.Println(s[1])
 	}
 }
-`}, 0, gosec.NewConfig()}, // TODO: Should be 3 violations - conditional logic bug with parameters
+`}, 3, gosec.NewConfig()},
 }
