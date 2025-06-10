@@ -50,11 +50,22 @@ func getSSAResult(pass *analysis.Pass) (*SSAAnalyzerResult, error) {
 	if !ok {
 		return nil, fmt.Errorf("no SSA result found in the analysis pass")
 	}
-	ssaResult, ok := result.(*SSAAnalyzerResult)
-	if !ok {
-		return nil, fmt.Errorf("the analysis pass result is not of type SSA")
+
+	// Handle both wrapped SSAAnalyzerResult (from gosec framework) and direct buildssa.SSA (standalone)
+	if ssaResult, ok := result.(*SSAAnalyzerResult); ok {
+		return ssaResult, nil
 	}
-	return ssaResult, nil
+
+	if ssa, ok := result.(*buildssa.SSA); ok {
+		// Create a wrapper for standalone usage
+		return &SSAAnalyzerResult{
+			Config: make(map[string]interface{}),
+			Logger: nil, // Will be nil for standalone usage
+			SSA:    ssa,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("the analysis pass result is not of expected type, got %T", result)
 }
 
 // newIssue creates a new gosec issue

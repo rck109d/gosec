@@ -53,7 +53,17 @@ func newSliceBoundsAnalyzer(id string, description string) *analysis.Analyzer {
 	}
 }
 
+// Configuration for choosing analysis approach
+var useScopeBasedAnalysis = true // Set to true to use the new closure-based approach
+
 func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
+	if useScopeBasedAnalysis {
+		return runSliceBoundsWithClosures(pass)
+	}
+	return runSliceBoundsLegacy(pass)
+}
+
+func runSliceBoundsLegacy(pass *analysis.Pass) (interface{}, error) {
 	ssaResult, err := getSSAResult(pass)
 	if err != nil {
 		return nil, err
@@ -994,3 +1004,500 @@ func shouldRemoveIssueForBounds(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound
 	}
 	return false
 }
+
+// SliceScopeState represents the bounds checking state within a scope
+type SliceScopeState struct {
+	safeBounds  map[ssa.Value]BoundInfo // Maps slice sources to their known safe bounds
+	parentScope *SliceScopeState        // Parent scope for lexical scoping
+	errors      []*issue.Issue          // Accumulated errors in this scope
+}
+
+// BoundInfo represents what we know about a slice's bounds
+type BoundInfo struct {
+	minSafeIndex int  // Minimum guaranteed safe index
+	maxSafeIndex int  // Maximum guaranteed safe index (-1 if unknown)
+	isExact      bool // Whether bounds are exact (local slice) or conservative (parameter)
+}
+
+// ScopeContext manages the parsing context with closures
+type ScopeContext struct {
+	pass     *analysis.Pass
+	analyzer *analysis.Analyzer
+}
+
+// WithScope creates a new scope and executes the given function within it
+func (ctx *ScopeContext) WithScope(parent *SliceScopeState, fn func(*SliceScopeState)) *SliceScopeState {
+	scope := &SliceScopeState{
+		safeBounds:  make(map[ssa.Value]BoundInfo),
+		parentScope: parent,
+		errors:      []*issue.Issue{},
+	}
+
+	// Copy parent bounds to current scope (inheritance)
+	if parent != nil {
+		for k, v := range parent.safeBounds {
+			scope.safeBounds[k] = v
+		}
+	}
+
+	fn(scope)
+	return scope
+}
+
+// WithCondition creates a new scope with updated bounds based on a condition
+func (ctx *ScopeContext) WithCondition(parent *SliceScopeState, condition *ssa.BinOp, conditionTrue bool, fn func(*SliceScopeState)) *SliceScopeState {
+	return ctx.WithScope(parent, func(scope *SliceScopeState) {
+		// Update bounds based on the condition
+		ctx.applyConditionToBounds(scope, condition, conditionTrue)
+		fn(scope)
+	})
+}
+
+// checkSliceAccess performs immediate bounds checking and accumulates errors
+func (ctx *ScopeContext) checkSliceAccess(scope *SliceScopeState, access ssa.Instruction) {
+	switch instr := access.(type) {
+	case *ssa.IndexAddr:
+		ctx.checkIndexAccess(scope, instr)
+	case *ssa.Slice:
+		ctx.checkSliceOperation(scope, instr)
+	}
+}
+
+// checkIndexAccess validates a slice index access
+func (ctx *ScopeContext) checkIndexAccess(scope *SliceScopeState, ia *ssa.IndexAddr) {
+	indexValue, err := extractNumberColonInt(ia.Index.String())
+	if err != nil {
+		return // Cannot statically analyze dynamic indices
+	}
+
+	sliceSource := getSliceSource(ia.X)
+	bounds, hasBounds := scope.safeBounds[sliceSource]
+
+	if !hasBounds {
+		// Unknown slice - report error to encourage defensive programming
+		ctx.addSliceError(scope, ia, "slice index out of range")
+		return
+	}
+
+	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.maxSafeIndex >= bounds.minSafeIndex {
+		// Known safe bounds (local slice) - check them precisely
+		if indexValue >= bounds.maxSafeIndex || indexValue < bounds.minSafeIndex {
+			ctx.addSliceError(scope, ia, "slice index out of range")
+		}
+	} else {
+		// Parameter slice or unknown bounds - encourage defensive programming
+		// Functions should check len() before accessing parameter slices
+		ctx.addSliceError(scope, ia, "slice index out of range")
+	}
+}
+
+// checkSliceOperation validates a slice operation
+func (ctx *ScopeContext) checkSliceOperation(scope *SliceScopeState, slice *ssa.Slice) {
+	low, high := extractSliceBounds(slice)
+	sliceSource := getSliceSource(slice.X)
+	bounds, hasBounds := scope.safeBounds[sliceSource]
+
+	fmt.Printf("DEBUG: checkSliceOperation: slice=%s, low=%d, high=%d, sliceSource=%s\n",
+		slice.String(), low, high, sliceSource.String())
+
+	if hasBounds {
+		fmt.Printf("DEBUG: Found bounds for slice source: minSafe=%d, maxSafe=%d, isExact=%t\n",
+			bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact)
+	} else {
+		fmt.Printf("DEBUG: No bounds found for slice source\n")
+	}
+
+	if !hasBounds {
+		// Unknown slice - report error and create new bounds for the result
+		fmt.Printf("DEBUG: Reporting error for unknown slice bounds\n")
+		ctx.addSliceError(scope, slice, "slice bounds out of range")
+		return
+	}
+
+	// Check if slice bounds are within known safe bounds
+	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.maxSafeIndex >= bounds.minSafeIndex {
+		// Known safe bounds (local slice) - check them precisely
+		fmt.Printf("DEBUG: Checking precise bounds for local slice\n")
+		if low < bounds.minSafeIndex {
+			fmt.Printf("DEBUG: Low bound %d < minSafeIndex %d - reporting error\n", low, bounds.minSafeIndex)
+			ctx.addSliceError(scope, slice, "slice bounds out of range")
+			return
+		}
+
+		if slice.High != nil {
+			// Case: s[low:high] - explicit high bound
+			fmt.Printf("DEBUG: Explicit high bound case\n")
+			if high > bounds.maxSafeIndex {
+				fmt.Printf("DEBUG: High bound %d > maxSafeIndex %d - reporting error\n", high, bounds.maxSafeIndex)
+				ctx.addSliceError(scope, slice, "slice bounds out of range")
+				return
+			}
+		} else {
+			// Case: s[low:] - implicit high bound (goes to end of slice)
+			fmt.Printf("DEBUG: Implicit high bound case\n")
+			if low > bounds.maxSafeIndex {
+				fmt.Printf("DEBUG: Low bound %d > maxSafeIndex %d - reporting error\n", low, bounds.maxSafeIndex)
+				ctx.addSliceError(scope, slice, "slice bounds out of range")
+				return
+			}
+		}
+	} else {
+		// Parameter slice or unknown bounds - encourage defensive programming
+		// Functions should check len() before accessing parameter slices
+		fmt.Printf("DEBUG: Parameter slice or unknown bounds - reporting error\n")
+		ctx.addSliceError(scope, slice, "slice bounds out of range")
+		return
+	}
+
+	// Create bounds info for the resulting slice
+	var newMaxIndex int
+	if slice.High != nil {
+		// Explicit high bound: new capacity is high - low
+		newMaxIndex = high - low
+	} else {
+		// Implicit high bound: new capacity is original capacity - low
+		if bounds.maxSafeIndex >= 0 {
+			newMaxIndex = bounds.maxSafeIndex - low
+		} else {
+			newMaxIndex = -1 // Unknown capacity
+		}
+	}
+
+	newBounds := BoundInfo{
+		minSafeIndex: 0,
+		maxSafeIndex: newMaxIndex,
+		isExact:      bounds.isExact,
+	}
+	scope.safeBounds[slice] = newBounds
+}
+
+// applyConditionToBounds updates the bounds based on a conditional
+func (ctx *ScopeContext) applyConditionToBounds(scope *SliceScopeState, condition *ssa.BinOp, conditionTrue bool) {
+	sliceParam, bound, value, err := ctx.extractLengthCondition(condition)
+	if err != nil {
+		return
+	}
+
+	existing, hasBounds := scope.safeBounds[sliceParam]
+	if !hasBounds {
+		existing = BoundInfo{minSafeIndex: -1, maxSafeIndex: -2, isExact: false}
+	}
+
+	// Apply the condition to refine bounds
+	newBounds := ctx.refineBounds(existing, bound, value, conditionTrue)
+	scope.safeBounds[sliceParam] = newBounds
+}
+
+// refineBounds applies a condition to existing bounds
+func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int, conditionTrue bool) BoundInfo {
+	newBounds := existing
+
+	if !conditionTrue {
+		// Invert the bound when condition is false
+		bound = invBound(bound)
+		if bound == lowerUnbounded {
+			value = value - 1 // len(s) < N becomes len(s) >= N-1
+		}
+	}
+
+	switch bound {
+	case lowerUnbounded: // len(s) > value
+		// len(s) > value means indices 0 through value are definitely safe
+		newBounds.minSafeIndex = 0
+		newBounds.maxSafeIndex = value
+	case upperUnbounded: // len(s) < value
+		// len(s) < value means indices 0 through value-1 might be safe
+		newBounds.minSafeIndex = 0
+		newBounds.maxSafeIndex = value - 1
+	case upperBounded: // len(s) == value
+		// len(s) == value means indices 0 through value-1 are exactly safe
+		newBounds.minSafeIndex = 0
+		newBounds.maxSafeIndex = value - 1
+		newBounds.isExact = true
+	}
+
+	return newBounds
+}
+
+// addSliceError adds an error to the current scope
+func (ctx *ScopeContext) addSliceError(scope *SliceScopeState, instr ssa.Instruction, message string) {
+	fmt.Printf("DEBUG: Adding error: %s at position %s\n", message, ctx.pass.Fset.Position(instr.Pos()))
+	issue := newIssue(
+		ctx.analyzer.Name,
+		message,
+		ctx.pass.Fset,
+		instr.Pos(),
+		issue.Low,
+		issue.High,
+	)
+	scope.errors = append(scope.errors, issue)
+}
+
+// evaluateConditionExactly evaluates a condition with known exact length
+func (ctx *ScopeContext) evaluateConditionExactly(bound bound, value int, exactLength int) (bool, bool) {
+	switch bound {
+	case lowerUnbounded: // len(s) > value
+		return true, exactLength > value
+	case upperUnbounded: // len(s) < value
+		return true, exactLength < value
+	case upperBounded: // len(s) == value
+		return true, exactLength == value
+	case unbounded: // len(s) != value
+		return true, exactLength != value
+	default:
+		return false, false
+	}
+}
+
+// extractLengthCondition extracts slice parameter and bounds from a condition
+func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value, bound, int, error) {
+	var sliceParam ssa.Value
+	var boundType bound
+	var value int
+
+	// Check if X is a len() call and Y is a constant
+	if call, ok := condition.X.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 {
+				sliceParam = getSliceSource(call.Call.Args[0])
+				if y, ok := condition.Y.(*ssa.Const); ok {
+					if val, err := strconv.Atoi(y.Value.String()); err == nil {
+						value = val
+						switch condition.Op {
+						case token.LSS:
+							boundType = upperUnbounded // len(s) < N
+						case token.LEQ:
+							boundType = upperUnbounded // len(s) <= N
+							value = value + 1          // Adjust for <= vs <
+						case token.GTR:
+							boundType = lowerUnbounded // len(s) > N
+						case token.GEQ:
+							boundType = lowerUnbounded // len(s) >= N
+							value = value - 1          // Adjust for >= vs >
+						case token.EQL:
+							boundType = upperBounded // len(s) == N
+						case token.NEQ:
+							boundType = unbounded // len(s) != N
+						}
+						return sliceParam, boundType, value, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Check if Y is a len() call and X is a constant
+	if call, ok := condition.Y.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 {
+				sliceParam = getSliceSource(call.Call.Args[0])
+				if x, ok := condition.X.(*ssa.Const); ok {
+					if val, err := strconv.Atoi(x.Value.String()); err == nil {
+						value = val
+						switch condition.Op {
+						case token.LSS:
+							boundType = lowerUnbounded // N < len(s)
+						case token.LEQ:
+							boundType = lowerUnbounded // N <= len(s)
+							value = value - 1          // Adjust for <= vs <
+						case token.GTR:
+							boundType = upperUnbounded // N > len(s)
+						case token.GEQ:
+							boundType = upperUnbounded // N >= len(s)
+							value = value + 1          // Adjust for >= vs >
+						case token.EQL:
+							boundType = upperBounded // N == len(s)
+						case token.NEQ:
+							boundType = unbounded // N != len(s)
+						}
+						return sliceParam, boundType, value, nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, lowerUnbounded, 0, fmt.Errorf("no length condition found")
+}
+
+// processBlockWithScope processes a basic block within a scope context
+func (ctx *ScopeContext) processBlockWithScope(scope *SliceScopeState, block *ssa.BasicBlock) {
+	ctx.processBlockWithScopeRecursive(scope, block, make(map[*ssa.BasicBlock]bool))
+}
+
+// processBlockWithScopeRecursive processes a basic block with visited tracking to prevent infinite loops
+func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, block *ssa.BasicBlock, visited map[*ssa.BasicBlock]bool) {
+	// Check if we've already visited this block to prevent infinite loops
+	if visited[block] {
+		return
+	}
+	visited[block] = true
+	for _, instr := range block.Instrs {
+		fmt.Printf("DEBUG: Processing instruction: %s (%T)\n", instr.String(), instr)
+		switch instr := instr.(type) {
+		case *ssa.Alloc:
+			// Create bounds for local slices
+			if sliceCap, err := extractSliceCapFromAlloc(instr); err == nil {
+				fmt.Printf("DEBUG: Found local slice alloc with capacity %d\n", sliceCap)
+				bounds := BoundInfo{
+					minSafeIndex: 0,
+					maxSafeIndex: sliceCap,
+					isExact:      true,
+				}
+				scope.safeBounds[instr] = bounds
+			}
+
+		case *ssa.IndexAddr, *ssa.Slice:
+			// Check slice access immediately
+			fmt.Printf("DEBUG: Found slice access: %s\n", instr.String())
+			ctx.checkSliceAccess(scope, instr)
+
+		case *ssa.If:
+			// Handle conditional scoping
+			condition, ok := instr.Cond.(*ssa.BinOp)
+			if !ok {
+				continue
+			}
+
+			// Process both branches with their respective scoped conditions
+			if len(instr.Block().Succs) == 2 {
+				// Create new visited maps for each branch to avoid cross-contamination
+				trueVisited := make(map[*ssa.BasicBlock]bool)
+				falseVisited := make(map[*ssa.BasicBlock]bool)
+
+				// Copy current visited state to both branches
+				for k, v := range visited {
+					trueVisited[k] = v
+					falseVisited[k] = v
+				}
+
+				// True branch
+				trueScope := ctx.WithCondition(scope, condition, true, func(trueScope *SliceScopeState) {
+					ctx.processBlockWithScopeRecursive(trueScope, instr.Block().Succs[0], trueVisited)
+				})
+
+				// False branch
+				falseScope := ctx.WithCondition(scope, condition, false, func(falseScope *SliceScopeState) {
+					ctx.processBlockWithScopeRecursive(falseScope, instr.Block().Succs[1], falseVisited)
+				})
+
+				// Merge errors from both branches
+				// But avoid duplicates at the same position
+				scope.errors = append(scope.errors, trueScope.errors...)
+				for _, falseError := range falseScope.errors {
+					// Check if this error already exists in scope.errors
+					isDuplicate := false
+					for _, existingError := range scope.errors {
+						if existingError.Line == falseError.Line &&
+							existingError.Col == falseError.Col &&
+							existingError.What == falseError.What {
+							isDuplicate = true
+							break
+						}
+					}
+					if !isDuplicate {
+						scope.errors = append(scope.errors, falseError)
+					}
+				}
+			}
+		}
+	}
+}
+
+// runSliceBoundsWithClosures implements the new closure-based approach
+func runSliceBoundsWithClosures(pass *analysis.Pass) (interface{}, error) {
+	fmt.Printf("DEBUG: runSliceBoundsWithClosures started\n")
+	ssaResult, err := getSSAResult(pass)
+	if err != nil {
+		fmt.Printf("DEBUG: getSSAResult error: %v\n", err)
+		return nil, err
+	}
+
+	fmt.Printf("DEBUG: SSA has %d SrcFuncs\n", len(ssaResult.SSA.SrcFuncs))
+	if len(ssaResult.SSA.SrcFuncs) == 0 {
+		// Try to see if there are functions in the program but they're not being classified as SrcFuncs
+		for _, pkg := range ssaResult.SSA.Pkg.Prog.AllPackages() {
+			fmt.Printf("DEBUG: Package %s has %d members\n", pkg.Pkg.Name(), len(pkg.Members))
+			for name, member := range pkg.Members {
+				if fn, ok := member.(*ssa.Function); ok {
+					fmt.Printf("DEBUG: Member %s is function %s (pos=%v)\n", name, fn.Name(), fn.Pos())
+				} else {
+					fmt.Printf("DEBUG: Member %s is %T\n", name, member)
+				}
+			}
+		}
+	}
+
+	ctx := &ScopeContext{
+		pass:     pass,
+		analyzer: pass.Analyzer,
+	}
+
+	allErrors := []*issue.Issue{}
+
+	for _, fn := range ssaResult.SSA.SrcFuncs {
+		fmt.Printf("DEBUG: Processing function %s\n", fn.Name())
+		// Create function scope
+		fnScope := ctx.WithScope(nil, func(scope *SliceScopeState) {
+			// Add function parameters as bounds sources
+			for _, param := range fn.Params {
+				if isSliceType(param.Type()) {
+					fmt.Printf("DEBUG: Found slice parameter %s with type %s\n", param.Name(), param.Type())
+					bounds := BoundInfo{
+						minSafeIndex: -1, // No indices are safe by default for parameters
+						maxSafeIndex: -1, // Unknown capacity
+						isExact:      false,
+					}
+					scope.safeBounds[param] = bounds
+				}
+			}
+
+			// Process function blocks
+			for _, block := range fn.DomPreorder() {
+				fmt.Printf("DEBUG: Processing block %s\n", block.String())
+				ctx.processBlockWithScope(scope, block)
+			}
+		})
+
+		fmt.Printf("DEBUG: Function %s generated %d errors\n", fn.Name(), len(fnScope.errors))
+		allErrors = append(allErrors, fnScope.errors...)
+	}
+
+	if len(allErrors) > 0 {
+		return allErrors, nil
+	}
+	return nil, nil
+}
+
+/*
+Example of how the closure-based approach naturally handles scope:
+
+func example(s []int) {
+    // Function scope: s has unknown bounds (parameter slice)
+
+    if len(s) > 5 {
+        // True branch scope: s[0] through s[5] are safe
+        println(s[3])  // ✓ Safe access
+        println(s[6])  // ✗ Potential out of bounds
+
+        if len(s) > 10 {
+            // Nested scope: s[0] through s[10] are safe
+            println(s[8])  // ✓ Safe access
+        }
+        // Back to parent scope: s[0] through s[5] are safe
+    } else {
+        // False branch scope: s[0] through s[4] might be safe
+        println(s[2])  // ✓ Conservative - might be safe
+        println(s[6])  // ✗ Definitely out of bounds
+    }
+    // Back to function scope: unknown bounds again
+}
+
+The closure approach:
+1. Creates scopes with WithScope/WithCondition
+2. Inherits bounds from parent scopes
+3. Refines bounds based on conditions
+4. Immediately checks accesses and accumulates errors
+5. Natural lexical scoping through closures
+6. No need for complex two-pass analysis
+*/
