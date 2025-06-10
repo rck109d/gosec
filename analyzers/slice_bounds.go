@@ -39,8 +39,20 @@ const (
 	upperBounded
 )
 
+var boundInverse = map[bound]bound{
+	lowerUnbounded: upperUnbounded,
+	upperUnbounded: lowerUnbounded,
+	unbounded:      upperBounded,
+	upperBounded:   unbounded,
+}
+
 var sliceCapRegex = regexp.MustCompile(`new \[(\d+)\]\w*(?:\s*\((?:new|makeslice)\))?`)
 var sliceLenRegex = regexp.MustCompile(`slice \w+\[:(\d+):`)
+
+// debugf provides a centralized debugf logging function with fmt.Printf-like interface
+func debugf(format string, args ...interface{}) {
+	fmt.Printf(format, args...)
+}
 
 func newSliceBoundsAnalyzer(id string, description string) *analysis.Analyzer {
 	return &analysis.Analyzer{
@@ -55,19 +67,11 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 	return runSliceBoundsWithClosures(pass)
 }
 
-func invBound(bound bound) bound {
-	switch bound {
-	case lowerUnbounded:
-		return upperUnbounded
-	case upperUnbounded:
-		return lowerUnbounded
-	case upperBounded:
-		return unbounded
-	case unbounded:
-		return upperBounded
-	default:
-		return unbounded
+func (b bound) inverse() bound {
+	if inv, ok := boundInverse[b]; ok {
+		return inv
 	}
+	return unbounded
 }
 
 func extractSliceBounds(slice *ssa.Slice) (int, int) {
@@ -237,9 +241,9 @@ type SliceScopeState struct {
 
 // BoundInfo represents what we know about a slice's bounds
 type BoundInfo struct {
-	minSafeIndex int  // Minimum guaranteed safe index
-	maxSafeIndex int  // Maximum guaranteed safe index (-1 if unknown)
-	isExact      bool // Whether bounds are exact (local slice) or conservative (parameter)
+	minSafeIndex   int  // Minimum guaranteed safe index
+	minUnsafeIndex int  // First index that is NOT safe - exclusive upper bound (-1 if unknown)
+	isExact        bool // Whether bounds are exact=true (local slice) or conservative=false (parameter)
 }
 
 // ScopeContext manages the parsing context with closures
@@ -304,34 +308,34 @@ func (ctx *ScopeContext) checkIndexAccess(scope *SliceScopeState, ia *ssa.IndexA
 		return
 	}
 
-	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.maxSafeIndex >= bounds.minSafeIndex {
+	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.minUnsafeIndex >= bounds.minSafeIndex {
 		// Known exact bounds (local slice) - check them precisely
-		if indexValue >= bounds.maxSafeIndex || indexValue < bounds.minSafeIndex {
-			fmt.Printf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+		if indexValue >= bounds.minUnsafeIndex || indexValue < bounds.minSafeIndex {
+			debugf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 			ctx.addSliceError(scope, ia, "slice index out of range")
 		} else {
-			fmt.Printf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+			debugf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 		}
 		// If within bounds, no error is reported
 	} else if !bounds.isExact {
 		// Parameter slice - check if we have safe bounds from conditions
-		if bounds.maxSafeIndex >= 0 && indexValue < bounds.maxSafeIndex {
+		if bounds.minUnsafeIndex >= 0 && indexValue < bounds.minUnsafeIndex {
 			// Access is within the guaranteed safe bounds for this parameter
-			fmt.Printf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+			debugf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 			return
 		}
 		// Otherwise, report error to encourage defensive programming
-		fmt.Printf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+		debugf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 		ctx.addSliceError(scope, ia, "slice index out of range")
 	} else {
 		// Other cases - need bounds from conditions to be safe
-		if bounds.maxSafeIndex >= 0 && indexValue < bounds.maxSafeIndex {
+		if bounds.minUnsafeIndex >= 0 && indexValue < bounds.minUnsafeIndex {
 			// Access is within the guaranteed safe bounds
-			fmt.Printf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+			debugf("SAFE: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 			return
 		}
 		// Report error if bounds are not sufficient
-		fmt.Printf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.maxSafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
+		debugf("ERROR: index=%d, bounds=[%d,%d), exact=%t at %s\n", indexValue, bounds.minSafeIndex, bounds.minUnsafeIndex, bounds.isExact, ctx.pass.Fset.Position(ia.Pos()))
 		ctx.addSliceError(scope, ia, "slice index out of range")
 	}
 }
@@ -351,7 +355,7 @@ func (ctx *ScopeContext) checkSliceOperation(scope *SliceScopeState, slice *ssa.
 	}
 
 	// Check if slice bounds are within known safe bounds
-	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.maxSafeIndex >= bounds.minSafeIndex {
+	if bounds.isExact && bounds.minSafeIndex >= 0 && bounds.minUnsafeIndex >= bounds.minSafeIndex {
 		// Known safe bounds (local slice) - check them precisely
 		if low < bounds.minSafeIndex {
 			ctx.addSliceError(scope, slice, "slice bounds out of range")
@@ -360,13 +364,13 @@ func (ctx *ScopeContext) checkSliceOperation(scope *SliceScopeState, slice *ssa.
 
 		if slice.High != nil {
 			// Case: s[low:high] - explicit high bound
-			if high > bounds.maxSafeIndex {
+			if high > bounds.minUnsafeIndex {
 				ctx.addSliceError(scope, slice, "slice bounds out of range")
 				return
 			}
 		} else {
 			// Case: s[low:] - implicit high bound (goes to end of slice)
-			if low > bounds.maxSafeIndex {
+			if low > bounds.minUnsafeIndex {
 				ctx.addSliceError(scope, slice, "slice bounds out of range")
 				return
 			}
@@ -379,23 +383,23 @@ func (ctx *ScopeContext) checkSliceOperation(scope *SliceScopeState, slice *ssa.
 	}
 
 	// Create bounds info for the resulting slice
-	var newMaxIndex int
+	var newMinUnsafeIndex int
 	if slice.High != nil {
 		// Explicit high bound: new capacity is high - low
-		newMaxIndex = high - low
+		newMinUnsafeIndex = high - low
 	} else {
 		// Implicit high bound: new capacity is original capacity - low
-		if bounds.maxSafeIndex >= 0 {
-			newMaxIndex = bounds.maxSafeIndex - low
+		if bounds.minUnsafeIndex >= 0 {
+			newMinUnsafeIndex = bounds.minUnsafeIndex - low
 		} else {
-			newMaxIndex = -1 // Unknown capacity
+			newMinUnsafeIndex = -1 // Unknown capacity
 		}
 	}
 
 	newBounds := BoundInfo{
-		minSafeIndex: 0,
-		maxSafeIndex: newMaxIndex,
-		isExact:      bounds.isExact,
+		minSafeIndex:   0,
+		minUnsafeIndex: newMinUnsafeIndex,
+		isExact:        bounds.isExact,
 	}
 	scope.safeBounds[slice] = newBounds
 }
@@ -409,13 +413,13 @@ func (ctx *ScopeContext) applyConditionToBounds(scope *SliceScopeState, conditio
 
 	existing, hasBounds := scope.safeBounds[sliceParam]
 	if !hasBounds {
-		existing = BoundInfo{minSafeIndex: -1, maxSafeIndex: -2, isExact: false}
+		existing = BoundInfo{minSafeIndex: -1, minUnsafeIndex: -2, isExact: false}
 	}
 
 	// Apply the condition to refine bounds (defensive programming approach)
 	newBounds := ctx.refineBounds(existing, bound, value, conditionTrue)
-	fmt.Printf("CONDITION: slice=%s, conditionTrue=%t, oldBounds=[%d,%d), newBounds=[%d,%d)\n",
-		sliceParam.String(), conditionTrue, existing.minSafeIndex, existing.maxSafeIndex, newBounds.minSafeIndex, newBounds.maxSafeIndex)
+	debugf("CONDITION: slice=%s, conditionTrue=%t, oldBounds=[%d,%d), newBounds=[%d,%d)\n",
+		sliceParam.String(), conditionTrue, existing.minSafeIndex, existing.minUnsafeIndex, newBounds.minSafeIndex, newBounds.minUnsafeIndex)
 	scope.safeBounds[sliceParam] = newBounds
 }
 
@@ -425,7 +429,7 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 
 	if !conditionTrue {
 		// Invert the bound when condition is false
-		bound = invBound(bound)
+		bound = bound.inverse()
 		if bound == lowerUnbounded {
 			value = value - 1 // len(s) < N becomes len(s) >= N-1
 		}
@@ -437,35 +441,35 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	case lowerUnbounded: // len(s) > value
 		// len(s) > value means indices 0 through value are definitely safe
 		conditionBounds = BoundInfo{
-			minSafeIndex: 0,
-			maxSafeIndex: value + 1, // +1 because maxSafeIndex is exclusive upper bound
-			isExact:      false,
+			minSafeIndex:   0,
+			minUnsafeIndex: value + 1, // +1 because minUnsafeIndex is exclusive upper bound
+			isExact:        false,
 		}
 	case upperUnbounded: // len(s) < value
 		// len(s) < value means slice length is at most value-1
 		// For parameter slices, we can't assume any access is safe unless we have
 		// existing bounds from parent scopes that guarantee safety
-		if existing.maxSafeIndex > 0 {
+		if existing.minUnsafeIndex > 0 {
 			// We have existing guarantees, so intersect with the upper bound
 			conditionBounds = BoundInfo{
-				minSafeIndex: 0,
-				maxSafeIndex: value, // value is the exclusive upper bound for len(s) < value
-				isExact:      false,
+				minSafeIndex:   0,
+				minUnsafeIndex: value, // value is the exclusive upper bound for len(s) < value
+				isExact:        false,
 			}
 		} else {
 			// No existing guarantees for parameter slices with upper bounds
 			conditionBounds = BoundInfo{
-				minSafeIndex: 0,
-				maxSafeIndex: 0, // No indices are guaranteed safe for parameter slices
-				isExact:      false,
+				minSafeIndex:   0,
+				minUnsafeIndex: 0, // No indices are guaranteed safe for parameter slices
+				isExact:        false,
 			}
 		}
 	case upperBounded: // len(s) == value
 		// len(s) == value means indices 0 through value-1 are exactly safe
 		conditionBounds = BoundInfo{
-			minSafeIndex: 0,
-			maxSafeIndex: value, // value is already the exclusive upper bound
-			isExact:      true,
+			minSafeIndex:   0,
+			minUnsafeIndex: value, // value is already the exclusive upper bound
+			isExact:        true,
 		}
 	default:
 		return existing // No change for other bound types
@@ -475,14 +479,14 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	// For sequential conditions in control flow, newer conditions provide
 	// stronger guarantees and should generally replace weaker ones
 
-	if existing.minSafeIndex < 0 || existing.maxSafeIndex < 0 {
+	if existing.minSafeIndex < 0 || existing.minUnsafeIndex < 0 {
 		// If existing bounds are uninitialized, use condition bounds
 		return conditionBounds
 	}
 
 	// For the common case where existing bounds are empty [0,0) and we get
 	// a condition that makes some indices safe, we should use the condition bounds
-	if existing.maxSafeIndex == 0 && conditionBounds.maxSafeIndex > 0 {
+	if existing.minUnsafeIndex == 0 && conditionBounds.minUnsafeIndex > 0 {
 		return conditionBounds
 	}
 
@@ -491,31 +495,31 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	case lowerUnbounded:
 		// len(s) > N: This provides a minimum guarantee, so take the stronger (larger) bound
 		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
-		newBounds.maxSafeIndex = max(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+		newBounds.minUnsafeIndex = max(existing.minUnsafeIndex, conditionBounds.minUnsafeIndex)
 	case upperUnbounded, upperBounded:
 		// len(s) <= N or len(s) == N: This provides a maximum constraint, so take intersection
 		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
-		newBounds.maxSafeIndex = min(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+		newBounds.minUnsafeIndex = min(existing.minUnsafeIndex, conditionBounds.minUnsafeIndex)
 	default:
 		// For other bound types, take intersection (more restrictive)
 		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
-		newBounds.maxSafeIndex = min(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+		newBounds.minUnsafeIndex = min(existing.minUnsafeIndex, conditionBounds.minUnsafeIndex)
 	}
 
-	// Ensure bounds are valid (minSafeIndex <= maxSafeIndex)
-	if newBounds.maxSafeIndex < newBounds.minSafeIndex {
-		newBounds.maxSafeIndex = newBounds.minSafeIndex
+	// Ensure bounds are valid (minSafeIndex <= minUnsafeIndex)
+	if newBounds.minUnsafeIndex < newBounds.minSafeIndex {
+		newBounds.minUnsafeIndex = newBounds.minSafeIndex
 	}
 
 	// Debug output to trace bounds refinement
-	fmt.Printf("REFINE: existing=[%d,%d), condition=[%d,%d), result=[%d,%d)\n",
-		existing.minSafeIndex, existing.maxSafeIndex,
-		conditionBounds.minSafeIndex, conditionBounds.maxSafeIndex,
-		newBounds.minSafeIndex, newBounds.maxSafeIndex)
+	debugf("REFINE: existing=[%d,%d), condition=[%d,%d), result=[%d,%d)\n",
+		existing.minSafeIndex, existing.minUnsafeIndex,
+		conditionBounds.minSafeIndex, conditionBounds.minUnsafeIndex,
+		newBounds.minSafeIndex, newBounds.minUnsafeIndex)
 
 	// If both are exact and match, result is exact
 	newBounds.isExact = existing.isExact && conditionBounds.isExact &&
-		existing.maxSafeIndex == conditionBounds.maxSafeIndex
+		existing.minUnsafeIndex == conditionBounds.minUnsafeIndex
 
 	return newBounds
 }
@@ -606,11 +610,6 @@ func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value
 	return nil, lowerUnbounded, 0, fmt.Errorf("no length condition found")
 }
 
-// processBlockWithScope processes a basic block within a scope context
-func (ctx *ScopeContext) processBlockWithScope(scope *SliceScopeState, block *ssa.BasicBlock) {
-	ctx.processBlockWithScopeRecursive(scope, block, make(map[*ssa.BasicBlock]bool))
-}
-
 // processBlockWithScopeRecursive processes a basic block with visited tracking to prevent infinite loops
 func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, block *ssa.BasicBlock, visited map[*ssa.BasicBlock]bool) {
 	// Check if we've already visited this block to prevent infinite loops
@@ -625,9 +624,9 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 			// Create bounds for local slices
 			if sliceCap, err := extractSliceCapFromAlloc(instr); err == nil {
 				bounds := BoundInfo{
-					minSafeIndex: 0,
-					maxSafeIndex: sliceCap,
-					isExact:      true,
+					minSafeIndex:   0,
+					minUnsafeIndex: sliceCap,
+					isExact:        true,
 				}
 				scope.safeBounds[instr] = bounds
 			}
@@ -694,14 +693,14 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 
 // mergeErrors merges errors from branch scopes into the parent scope, avoiding duplicates
 func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *SliceScopeState, falseScope *SliceScopeState) {
-	fmt.Printf("MERGE: trueScope has %d errors, falseScope has %d errors\n", len(trueScope.errors), len(falseScope.errors))
+	debugf("MERGE: trueScope has %d errors, falseScope has %d errors\n", len(trueScope.errors), len(falseScope.errors))
 
 	for i, err := range trueScope.errors {
-		fmt.Printf("  TRUE[%d]: %s:%s:%s - %s\n", i, err.File, err.Line, err.Col, err.What)
+		debugf("  TRUE[%d]: %s:%s:%s - %s\n", i, err.File, err.Line, err.Col, err.What)
 	}
 
 	for i, err := range falseScope.errors {
-		fmt.Printf("  FALSE[%d]: %s:%s:%s - %s\n", i, err.File, err.Line, err.Col, err.What)
+		debugf("  FALSE[%d]: %s:%s:%s - %s\n", i, err.File, err.Line, err.Col, err.What)
 	}
 
 	// For static analysis, we report all errors from both branches
@@ -713,7 +712,7 @@ func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *Sl
 	for _, err := range trueScope.errors {
 		key := fmt.Sprintf("%s:%s:%s:%s", err.File, err.Line, err.Col, err.Autofix)
 		if !seenErrors[key] {
-			fmt.Printf("MERGE: Adding error from true branch: %s\n", key)
+			debugf("MERGE: Adding error from true branch: %s\n", key)
 			// Clear the internal instruction pointer before adding to parent scope
 			err.Autofix = ""
 			parentScope.errors = append(parentScope.errors, err)
@@ -725,7 +724,7 @@ func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *Sl
 	for _, err := range falseScope.errors {
 		key := fmt.Sprintf("%s:%s:%s:%s", err.File, err.Line, err.Col, err.Autofix)
 		if !seenErrors[key] {
-			fmt.Printf("MERGE: Adding error from false branch: %s\n", key)
+			debugf("MERGE: Adding error from false branch: %s\n", key)
 			// Clear the internal instruction pointer before adding to parent scope
 			err.Autofix = ""
 			parentScope.errors = append(parentScope.errors, err)
@@ -733,7 +732,7 @@ func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *Sl
 		}
 	}
 
-	fmt.Printf("MERGE: Final parent scope has %d errors\n", len(parentScope.errors))
+	debugf("MERGE: Final parent scope has %d errors\n", len(parentScope.errors))
 }
 
 // runSliceBoundsWithClosures implements the closure-based approach
@@ -757,9 +756,9 @@ func runSliceBoundsWithClosures(pass *analysis.Pass) (interface{}, error) {
 			for _, param := range fn.Params {
 				if isSliceType(param.Type()) {
 					bounds := BoundInfo{
-						minSafeIndex: -1, // No indices are safe by default for parameters
-						maxSafeIndex: -1, // Unknown capacity
-						isExact:      false,
+						minSafeIndex:   -1, // No indices are safe by default for parameters
+						minUnsafeIndex: -1, // Unknown capacity
+						isExact:        false,
 					}
 					scope.safeBounds[param] = bounds
 				}
