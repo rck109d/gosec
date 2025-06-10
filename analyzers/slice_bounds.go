@@ -520,45 +520,6 @@ func (ctx *ScopeContext) addSliceError(scope *SliceScopeState, instr ssa.Instruc
 	scope.errors = append(scope.errors, issue)
 }
 
-// isConditionStatic checks if a condition can be statically determined for exact bounds
-func (ctx *ScopeContext) isConditionStatic(scope *SliceScopeState, condition *ssa.BinOp) (isAlwaysTrue, isAlwaysFalse bool) {
-	sliceParam, bound, value, err := ctx.extractLengthCondition(condition)
-	if err != nil {
-		return false, false
-	}
-
-	existing, hasBounds := scope.safeBounds[sliceParam]
-	if !hasBounds || !existing.isExact {
-		return false, false // Can't determine for non-exact bounds
-	}
-
-	// For exact bounds, we can statically check conditions
-	exactLength := existing.maxSafeIndex // maxSafeIndex is the exact length for exact bounds
-
-	switch bound {
-	case lowerUnbounded: // len(s) > value
-		if exactLength > value {
-			return true, false // Always true
-		} else {
-			return false, true // Always false
-		}
-	case upperUnbounded: // len(s) < value
-		if exactLength < value {
-			return true, false // Always true
-		} else {
-			return false, true // Always false
-		}
-	case upperBounded: // len(s) == value
-		if exactLength == value {
-			return true, false // Always true
-		} else {
-			return false, true // Always false
-		}
-	}
-
-	return false, false // Can't determine
-}
-
 // extractLengthCondition extracts slice parameter and bounds from a condition
 func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value, bound, int, error) {
 	var sliceParam ssa.Value
@@ -687,9 +648,6 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 				continue
 			}
 
-			// Check if this condition can be statically determined for exact bounds
-			isAlwaysTrue, isAlwaysFalse := ctx.isConditionStatic(scope, condition)
-
 			// Process both branches with their respective scoped conditions
 			if len(instr.Block().Succs) == 2 {
 				// Create new visited maps for each branch to avoid cross-contamination
@@ -702,28 +660,15 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 					falseVisited[k] = v
 				}
 
-				var trueScope, falseScope *SliceScopeState
+				// True branch - condition is true
+				trueScope := ctx.WithCondition(scope, condition, true, func(trueScope *SliceScopeState) {
+					ctx.processBlockWithScopeRecursive(trueScope, instr.Block().Succs[0], trueVisited)
+				})
 
-				// Only process reachable branches
-				if !isAlwaysFalse {
-					// True branch - condition is true
-					trueScope = ctx.WithCondition(scope, condition, true, func(trueScope *SliceScopeState) {
-						ctx.processBlockWithScopeRecursive(trueScope, instr.Block().Succs[0], trueVisited)
-					})
-				} else {
-					// Create empty scope for unreachable branch
-					trueScope = &SliceScopeState{safeBounds: make(map[ssa.Value]BoundInfo), errors: []*issue.Issue{}}
-				}
-
-				if !isAlwaysTrue {
-					// False branch - condition is false
-					falseScope = ctx.WithCondition(scope, condition, false, func(falseScope *SliceScopeState) {
-						ctx.processBlockWithScopeRecursive(falseScope, instr.Block().Succs[1], falseVisited)
-					})
-				} else {
-					// Create empty scope for unreachable branch
-					falseScope = &SliceScopeState{safeBounds: make(map[ssa.Value]BoundInfo), errors: []*issue.Issue{}}
-				}
+				// False branch - condition is false
+				falseScope := ctx.WithCondition(scope, condition, false, func(falseScope *SliceScopeState) {
+					ctx.processBlockWithScopeRecursive(falseScope, instr.Block().Succs[1], falseVisited)
+				})
 
 				// Merge errors from both branches, avoiding duplicates
 				ctx.mergeErrors(scope, trueScope, falseScope)
@@ -733,7 +678,6 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 }
 
 // mergeErrors merges errors from branch scopes into the parent scope, avoiding duplicates
-// Only reports errors that would occur in actual execution paths
 func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *SliceScopeState, falseScope *SliceScopeState) {
 	fmt.Printf("MERGE: trueScope has %d errors, falseScope has %d errors\n", len(trueScope.errors), len(falseScope.errors))
 
@@ -745,46 +689,32 @@ func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *Sl
 		fmt.Printf("  FALSE[%d]: %s:%s:%s - %s\n", i, err.File, err.Line, err.Col, err.What)
 	}
 
-	// For static analysis, we should only report errors that:
-	// 1. Occur in both branches (definite errors), OR
-	// 2. Occur in one branch but the other branch is unreachable
+	// For static analysis, we report all errors from both branches
 
-	// Create maps for efficient lookup
-	trueErrors := make(map[string]*issue.Issue)
-	falseErrors := make(map[string]*issue.Issue)
+	// Create map to avoid duplicate errors
+	seenErrors := make(map[string]bool)
 
+	// Add all errors from true branch
 	for _, err := range trueScope.errors {
 		key := fmt.Sprintf("%s:%s:%s:%s", err.File, err.Line, err.Col, err.Autofix)
-		trueErrors[key] = err
-	}
-
-	for _, err := range falseScope.errors {
-		key := fmt.Sprintf("%s:%s:%s:%s", err.File, err.Line, err.Col, err.Autofix)
-		falseErrors[key] = err
-	}
-
-	// Add errors that occur in both branches (definite errors)
-	for key, err := range trueErrors {
-		if _, existsInFalse := falseErrors[key]; existsInFalse {
-			fmt.Printf("MERGE: Adding error that occurs in both branches: %s\n", key)
+		if !seenErrors[key] {
+			fmt.Printf("MERGE: Adding error from true branch: %s\n", key)
 			// Clear the internal instruction pointer before adding to parent scope
 			err.Autofix = ""
 			parentScope.errors = append(parentScope.errors, err)
-		} else {
-			fmt.Printf("MERGE: Adding error from true branch only: %s\n", key)
-			// Clear the internal instruction pointer before adding to parent scope
-			err.Autofix = ""
-			parentScope.errors = append(parentScope.errors, err)
+			seenErrors[key] = true
 		}
 	}
 
-	// Add errors that only occur in false branch
-	for key, err := range falseErrors {
-		if _, existsInTrue := trueErrors[key]; !existsInTrue {
-			fmt.Printf("MERGE: Adding error from false branch only: %s\n", key)
+	// Add all errors from false branch
+	for _, err := range falseScope.errors {
+		key := fmt.Sprintf("%s:%s:%s:%s", err.File, err.Line, err.Col, err.Autofix)
+		if !seenErrors[key] {
+			fmt.Printf("MERGE: Adding error from false branch: %s\n", key)
 			// Clear the internal instruction pointer before adding to parent scope
 			err.Autofix = ""
 			parentScope.errors = append(parentScope.errors, err)
+			seenErrors[key] = true
 		}
 	}
 
