@@ -483,6 +483,81 @@ func extractSliceLenFromSlice(s *ssa.Slice) (int, error) {
 	return extractSliceLenFromString(s.String())
 }
 
+// extractSliceLenAndCapFromSlice extracts both length and capacity from a *ssa.Slice instruction
+// Returns (length, capacity, error). For make() slices, capacity comes from underlying *ssa.Alloc.
+// For 3-index slices (arr[low:high:max]), both length and capacity are computed from bounds.
+func extractSliceLenAndCapFromSlice(s *ssa.Slice) (int, int, error) {
+	// Check if this is a 3-index slice (has Max field)
+	if s.Max != nil {
+		// For 3-index slices: arr[low:high:max]
+		// Length = high - low, Capacity = max - low
+		low := 0
+		if s.Low != nil {
+			if lowConst, ok := s.Low.(*ssa.Const); ok {
+				if lowVal, err := strconv.Atoi(lowConst.Value.String()); err == nil {
+					low = lowVal
+				}
+			}
+		}
+
+		high := 0
+		if s.High != nil {
+			if highConst, ok := s.High.(*ssa.Const); ok {
+				if highVal, err := strconv.Atoi(highConst.Value.String()); err == nil {
+					high = highVal
+				}
+			}
+		}
+
+		if maxConst, ok := s.Max.(*ssa.Const); ok {
+			if maxVal, err := strconv.Atoi(maxConst.Value.String()); err == nil {
+				length := high - low
+				capacity := maxVal - low
+				return length, capacity, nil
+			}
+		}
+		return 0, 0, errors.New("could not extract bounds from 3-index slice")
+	}
+
+	// For regular slices (including make() and 2-index), try to extract length from string representation
+	length, err := extractSliceLenFromSlice(s)
+	if err != nil {
+		// If string parsing fails, try to compute from High and Low fields
+		if s.High != nil && s.Low != nil {
+			low := 0
+			if lowConst, ok := s.Low.(*ssa.Const); ok {
+				if lowVal, err := strconv.Atoi(lowConst.Value.String()); err == nil {
+					low = lowVal
+				}
+			}
+
+			if highConst, ok := s.High.(*ssa.Const); ok {
+				if highVal, err := strconv.Atoi(highConst.Value.String()); err == nil {
+					length = highVal - low
+				} else {
+					return 0, 0, fmt.Errorf("failed to extract length: %w", err)
+				}
+			} else {
+				return 0, 0, fmt.Errorf("failed to extract length: %w", err)
+			}
+		} else {
+			return 0, 0, fmt.Errorf("failed to extract length: %w", err)
+		}
+	}
+
+	// For make() slices, capacity comes from the underlying allocation
+	if alloc, ok := s.X.(*ssa.Alloc); ok {
+		capacity, err := extractSliceCapFromAlloc(alloc)
+		if err != nil {
+			return length, 0, fmt.Errorf("failed to extract capacity from alloc: %w", err)
+		}
+		return length, capacity, nil
+	}
+
+	// If we can't determine capacity, return just the length
+	return length, 0, errors.New("could not determine slice capacity")
+}
+
 func isSliceType(t types.Type) bool {
 	if _, ok := t.(*types.Slice); ok {
 		return true

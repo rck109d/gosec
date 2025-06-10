@@ -539,3 +539,245 @@ func test() IntSlice {
 		})
 	}
 }
+
+func TestExtractSliceLenAndCapFromSlice(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        string
+		expectedLen int
+		expectedCap int
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "make slice with length and capacity",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 5, 10)
+	return s
+}`,
+			expectedLen: 5,
+			expectedCap: 10,
+			expectError: false,
+		},
+		{
+			name: "make slice with same length and capacity",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 7)
+	return s
+}`,
+			expectedLen: 7,
+			expectedCap: 7,
+			expectError: false,
+		},
+		{
+			name: "zero length slice with capacity",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 0, 15)
+	return s
+}`,
+			expectedLen: 0,
+			expectedCap: 15,
+			expectError: false,
+		},
+		{
+			name: "named type slice",
+			code: `
+package test
+type IntSlice []int
+func test() IntSlice {
+	s := make(IntSlice, 3, 8)
+	return s
+}`,
+			expectedLen: 3,
+			expectedCap: 8,
+			expectError: false,
+		},
+		{
+			name: "nested named type slice",
+			code: `
+package test
+type BaseSlice []string
+type MySlice BaseSlice
+func test() MySlice {
+	s := make(MySlice, 2, 6)
+	return s
+}`,
+			expectedLen: 2,
+			expectedCap: 6,
+			expectError: false,
+		},
+		{
+			name: "large capacity slice",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 50, 100)
+	return s
+}`,
+			expectedLen: 50,
+			expectedCap: 100,
+			expectError: false,
+		},
+		{
+			name: "multi-declaration first slice",
+			code: `
+package test
+func test() ([]int, []string) {
+	s1, s2 := make([]int, 4, 12), make([]string, 6, 18)
+	return s1, s2
+}`,
+			expectedLen: 4,
+			expectedCap: 12,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slices, err := slicesFromCode(tt.code)
+			if err != nil {
+				t.Fatalf("failed to create SSA: %v", err)
+			}
+
+			if len(slices) == 0 {
+				t.Fatal("no slice instructions found in SSA")
+			}
+
+			length, capacity, err := extractSliceLenAndCapFromSlice(slices[0])
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+					return
+				}
+				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
+					t.Errorf("expected error message '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if length != tt.expectedLen {
+					t.Errorf("expected length %d, got %d", tt.expectedLen, length)
+				}
+				if capacity != tt.expectedCap {
+					t.Errorf("expected capacity %d, got %d", tt.expectedCap, capacity)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractSliceLenAndCapFromSliceAdvanced(t *testing.T) {
+	// Test multi-declaration both slices
+	t.Run("multi-declaration both slices", func(t *testing.T) {
+		code := `
+package test
+func test() ([]int, []string) {
+	s1, s2 := make([]int, 4, 12), make([]string, 6, 18)
+	return s1, s2
+}`
+		slices, err := slicesFromCode(code)
+		if err != nil {
+			t.Fatalf("failed to create SSA: %v", err)
+		}
+
+		if len(slices) < 2 {
+			t.Fatalf("expected at least 2 slice instructions, found %d", len(slices))
+		}
+
+		// Test first slice
+		length1, capacity1, err := extractSliceLenAndCapFromSlice(slices[0])
+		if err != nil {
+			t.Errorf("unexpected error for first slice: %v", err)
+		} else {
+			if length1 != 4 {
+				t.Errorf("expected length 4 for first slice, got %d", length1)
+			}
+			if capacity1 != 12 {
+				t.Errorf("expected capacity 12 for first slice, got %d", capacity1)
+			}
+		}
+
+		// Test second slice
+		length2, capacity2, err := extractSliceLenAndCapFromSlice(slices[1])
+		if err != nil {
+			t.Errorf("unexpected error for second slice: %v", err)
+		} else {
+			if length2 != 6 {
+				t.Errorf("expected length 6 for second slice, got %d", length2)
+			}
+			if capacity2 != 18 {
+				t.Errorf("expected capacity 18 for second slice, got %d", capacity2)
+			}
+		}
+	})
+
+	// Test 3-index slice
+	t.Run("3-index slice", func(t *testing.T) {
+		code := `
+package test
+func test() []int {
+	arr := [10]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	s := arr[2:7:9]
+	return s
+}`
+		slices, err := slicesFromCode(code)
+		if err != nil {
+			t.Fatalf("failed to create SSA: %v", err)
+		}
+
+		if len(slices) == 0 {
+			t.Fatal("no slice instructions found in SSA")
+		}
+
+		length, capacity, err := extractSliceLenAndCapFromSlice(slices[0])
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		} else {
+			expectedLength := 5   // 7 - 2
+			expectedCapacity := 7 // 9 - 2
+			if length != expectedLength {
+				t.Errorf("expected length %d, got %d", expectedLength, length)
+			}
+			if capacity != expectedCapacity {
+				t.Errorf("expected capacity %d, got %d", expectedCapacity, capacity)
+			}
+		}
+	})
+
+	// Test error cases (slices that don't come from make or 3-index)
+	t.Run("parameter slice - capacity unknown", func(t *testing.T) {
+		code := `
+package test
+func test(input []int) []int {
+	s := input[1:5]
+	return s
+}`
+		slices, err := slicesFromCode(code)
+		if err != nil {
+			t.Fatalf("failed to create SSA: %v", err)
+		}
+
+		if len(slices) == 0 {
+			t.Fatal("no slice instructions found in SSA")
+		}
+
+		length, capacity, err := extractSliceLenAndCapFromSlice(slices[0])
+		if err == nil {
+			t.Errorf("expected error for parameter slice, but got length=%d, capacity=%d", length, capacity)
+		} else {
+			expectedError := "could not determine slice capacity"
+			if err.Error() != expectedError {
+				t.Errorf("expected error '%s', got '%s'", expectedError, err.Error())
+			}
+		}
+	})
+}
