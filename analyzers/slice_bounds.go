@@ -280,7 +280,7 @@ func trackSliceBounds(depth int, sliceCap int, slice ssa.Node, violations *[]ssa
 					trackSliceBounds(depth, newCap, refinstr, violations, ifs)
 				}
 			case *ssa.IndexAddr:
-				indexValue, err := extractIntValue(refinstr.Index.String())
+				indexValue, err := extractNumberColonInt(refinstr.Index.String())
 				if err == nil && !isSliceIndexInsideBounds(0, sliceCap, indexValue) {
 					*violations = append(*violations, refinstr)
 				}
@@ -468,14 +468,14 @@ func isSliceInsideBounds(l, h int, cl, ch int) bool {
 func extractSliceBounds(slice *ssa.Slice) (int, int) {
 	var low int
 	if slice.Low != nil {
-		l, err := extractIntValue(slice.Low.String())
+		l, err := extractNumberColonInt(slice.Low.String())
 		if err == nil {
 			low = l
 		}
 	}
 	var high int
 	if slice.High != nil {
-		h, err := extractIntValue(slice.High.String())
+		h, err := extractNumberColonInt(slice.High.String())
 		if err == nil {
 			high = h
 		}
@@ -483,13 +483,13 @@ func extractSliceBounds(slice *ssa.Slice) (int, int) {
 	return low, high
 }
 
-func extractIntValue(value string) (int, error) {
-	parts := strings.Split(value, ":")
+func extractNumberColonInt(s string) (int, error) {
+	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
-		return 0, fmt.Errorf("invalid value: %s", value)
+		return 0, fmt.Errorf("invalid string: %s", s)
 	}
 	if parts[1] != "int" {
-		return 0, fmt.Errorf("invalid value: %s", value)
+		return 0, fmt.Errorf("invalid string: %s", s)
 	}
 	return strconv.Atoi(parts[0])
 }
@@ -599,20 +599,6 @@ func extractSliceLenAndCapFromSlice(s *ssa.Slice) (int, int, error) {
 
 	// If we can't determine capacity, return just the length
 	return length, 0, errors.New("could not determine slice capacity")
-}
-
-func isSliceType(t types.Type) bool {
-	if _, ok := t.(*types.Slice); ok {
-		return true
-	}
-
-	if named, ok := t.(*types.Named); ok {
-		if _, ok := named.Underlying().(*types.Slice); ok {
-			return true
-		}
-	}
-
-	return false
 }
 
 // isLikelyRangeLoop uses simple heuristics to detect if a parameter slice is used in a range loop
@@ -830,7 +816,7 @@ func evaluateExactCondition(binop *ssa.BinOp, sliceSource ssa.Value, exactLength
 
 // processLocalSliceIssue handles bounds checking for locally-created slices (exact bounds known)
 func processLocalSliceIssue(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound, value int) bool {
-	indexValue, err := extractIntValue(ia.Index.String())
+	indexValue, err := extractNumberColonInt(ia.Index.String())
 	if err != nil {
 		return false
 	}
@@ -888,7 +874,7 @@ func processLocalSliceIssue(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound, va
 
 // processExternalSliceIssue handles bounds checking for external slices (parameters, unknown bounds)
 func processExternalSliceIssue(tinstr *ssa.IndexAddr, binop *ssa.BinOp, bound bound, value int) bool {
-	indexValue, err := extractIntValue(tinstr.Index.String())
+	indexValue, err := extractNumberColonInt(tinstr.Index.String())
 	if err != nil {
 		return false
 	}
@@ -957,6 +943,14 @@ func shouldFallBackToHeuristic(indexValue int, bound bound, value int) bool {
 	default:
 		return false
 	}
+}
+
+func isSliceType(t types.Type) bool {
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	_, ok := t.(*types.Slice)
+	return ok
 }
 
 // isLocalSlice determines if a slice instruction refers to a locally-created slice
