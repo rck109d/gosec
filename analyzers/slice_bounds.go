@@ -125,8 +125,30 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 						sliceSource = changeType.X
 					}
 
-					// Check if the slice source is a parameter slice
-					if param, ok := sliceSource.(*ssa.Parameter); ok && isSliceType(param.Type()) {
+					var param *ssa.Parameter
+
+					// Check if the slice source is directly a parameter slice
+					if p, ok := sliceSource.(*ssa.Parameter); ok && isSliceType(p.Type()) {
+						param = p
+					} else if unOp, ok := sliceSource.(*ssa.UnOp); ok {
+						// Handle indirection through UnOp (like *t0 where t0 stores a parameter)
+						if alloc, ok := unOp.X.(*ssa.Alloc); ok {
+							// Look for what was stored in this alloc
+							refs := alloc.Referrers()
+							if refs != nil {
+								for _, ref := range *refs {
+									if store, ok := ref.(*ssa.Store); ok {
+										if p, ok := store.Val.(*ssa.Parameter); ok && isSliceType(p.Type()) {
+											param = p
+											break
+										}
+									}
+								}
+							}
+						}
+					}
+
+					if param != nil {
 						// Skip if this appears to be a range loop (simple heuristic)
 						if !isLikelyRangeLoop(param) {
 							// Track bounds for parameter slices to detect length conditions
@@ -153,14 +175,27 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 			continue
 		}
 		originalBound := bound
-		for i, block := range ifref.Block().Succs {
+
+		// Get the successor blocks
+		succs := ifref.Block().Succs
+		if len(succs) != 2 {
+			continue // Only handle simple if-else structures
+		}
+
+		for i, block := range succs {
+			currentBound := bound
 			if i == 1 {
-				bound = invBound(bound)
+				currentBound = invBound(bound)
 				// Adjust value for inverted lowerUnbounded (len(s) < N -> len(s) >= N)
 				if originalBound == lowerUnbounded {
 					value = value - 1
 				}
 			}
+
+			// Check if this block is a merge point (has multiple predecessors)
+			// Only skip merge points for local slices, not external slices
+			isMerge := len(block.Preds) > 1
+
 			var processBlock func(block *ssa.BasicBlock, depth int)
 			processBlock = func(block *ssa.BasicBlock, depth int) {
 				if depth == maxDepth {
@@ -169,26 +204,34 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 				depth++
 				for _, instr := range block.Instrs {
 					if _, ok := issues[instr]; ok {
-						switch bound {
+						switch currentBound {
 						case lowerUnbounded:
 							// Temporarily add handling for lowerUnbounded case like other bounds
 							switch tinstr := instr.(type) {
 							case *ssa.IndexAddr:
-								if shouldRemoveIssueForBounds(tinstr, binop, bound, value) {
+								// For local slices, skip merge points; for external slices, process normally
+								if isLocalSlice(tinstr) && isMerge {
+									continue
+								}
+								if shouldRemoveIssueForBounds(tinstr, binop, currentBound, value) {
 									delete(issues, instr)
 								}
 							}
 						case upperUnbounded, unbounded, upperBounded:
 							switch tinstr := instr.(type) {
 							case *ssa.Slice:
-								if bound == upperBounded {
+								if currentBound == upperBounded {
 									lower, upper := extractSliceBounds(tinstr)
 									if isSliceInsideBounds(0, value, lower, upper) {
 										delete(issues, instr)
 									}
 								}
 							case *ssa.IndexAddr:
-								if shouldRemoveIssueForBounds(tinstr, binop, bound, value) {
+								// For local slices, skip merge points; for external slices, process normally
+								if isLocalSlice(tinstr) && isMerge {
+									continue
+								}
+								if shouldRemoveIssueForBounds(tinstr, binop, currentBound, value) {
 									delete(issues, instr)
 								}
 							}
@@ -367,13 +410,13 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 			}
 			switch binop.Op {
 			case token.LSS:
-				return upperUnbounded, value, nil
+				return lowerUnbounded, value, nil // N < len(s) means len(s) > N, so indices 0..N are safe
 			case token.LEQ:
-				return upperUnbounded, value - 1, nil
+				return lowerUnbounded, value - 1, nil // N <= len(s) means len(s) >= N, so indices 0..N-1 are safe
 			case token.GTR:
-				return lowerUnbounded, value, nil
+				return upperUnbounded, value - 1, nil // N > len(s) means len(s) < N, so indices 0..N-2 are safe
 			case token.GEQ:
-				return lowerUnbounded, value + 1, nil
+				return upperUnbounded, value, nil // N >= len(s) means len(s) <= N, so indices 0..N-1 are safe
 			case token.EQL:
 				return upperBounded, value, nil
 			case token.NEQ:
@@ -389,13 +432,13 @@ func extractBinOpBound(binop *ssa.BinOp) (bound, int, error) {
 			}
 			switch binop.Op {
 			case token.LSS:
-				return lowerUnbounded, value, nil
+				return upperUnbounded, value - 1, nil // len(s) < N means indices 0..N-2 are safe
 			case token.LEQ:
-				return lowerUnbounded, value + 1, nil
+				return upperUnbounded, value, nil // len(s) <= N means indices 0..N-1 are safe
 			case token.GTR:
-				return upperUnbounded, value, nil
+				return lowerUnbounded, value, nil // len(s) > N means indices 0..N are safe
 			case token.GEQ:
-				return upperUnbounded, value - 1, nil
+				return lowerUnbounded, value - 1, nil // len(s) >= N means indices 0..N-1 are safe
 			case token.EQL:
 				return upperBounded, value, nil
 			case token.NEQ:
@@ -823,16 +866,19 @@ func processLocalSliceIssue(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound, va
 		switch bound {
 		case lowerUnbounded:
 			if !*conditionResult {
-				return true // Unreachable code - condition is false
+				return true // Unreachable code - condition is false, so remove issue
 			}
-			return indexValue < exactLength // Check exact bounds
+			// If condition is true, check bounds based on what the condition guarantees
+			return indexValue <= value // len(s) > value means indices 0..value are safe
 		case upperUnbounded, unbounded:
 			if !*conditionResult {
-				return true // Unreachable code - condition is false
+				return true // Unreachable code - condition is false, so remove issue
 			}
-			return indexValue < exactLength // Check exact bounds
+			// If condition is true, check bounds based on what the condition guarantees
+			return indexValue < value // len(s) < value means indices 0..value-1 are safe
 		case upperBounded:
-			return *conditionResult && indexValue < exactLength
+			// For exact equality, only safe if condition is true AND within bounds
+			return *conditionResult && indexValue < value
 		}
 	}
 
@@ -919,8 +965,20 @@ func isLocalSlice(ia *ssa.IndexAddr) bool {
 	if ct, ok := v.(*ssa.ChangeType); ok {
 		v = ct.X
 	}
-	_, ok := v.(*ssa.Alloc)
-	return ok
+
+	// Check if v is directly an Alloc
+	if _, ok := v.(*ssa.Alloc); ok {
+		return true
+	}
+
+	// Check if v is a Slice backed by an Alloc
+	if slice, ok := v.(*ssa.Slice); ok {
+		if _, ok := slice.X.(*ssa.Alloc); ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // isExternalSlice determines if a slice instruction refers to an external slice (parameter)

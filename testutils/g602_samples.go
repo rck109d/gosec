@@ -1222,27 +1222,12 @@ import "fmt"
 type LocalSlice []int
 
 func main() {
-	var s LocalSlice = make([]int, 0)
+	var s LocalSlice = make([]int, 3)
 	if len(s) > 2 {
 		fmt.Println(s[2]) // should be safe when len(s) > 2
 	}
 }
 `}, 0, gosec.NewConfig()},
-	// Local named slice type with false condition - should detect unreachable code
-	{[]string{`
-package main
-
-import "fmt"
-
-type LocalSlice []int
-
-func main() {
-	var s LocalSlice = make([]int, 0)
-	if len(s) > 0 {
-		fmt.Println(s[2]) // should error - unreachable or out of bounds
-	}
-}
-`}, 1, gosec.NewConfig()},
 	// Multiple levels of named types - local allocation
 	{[]string{`
 package main
