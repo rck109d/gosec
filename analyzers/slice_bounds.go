@@ -41,6 +41,9 @@ const (
 
 const maxDepth = 20
 
+var sliceCapRegex = regexp.MustCompile(`new \[(\d+)\]\w*(?:\s*\((?:new|makeslice)\))?`)
+var sliceLenRegex = regexp.MustCompile(`slice \w+\[:(\d+):`)
+
 func newSliceBoundsAnalyzer(id string, description string) *analysis.Analyzer {
 	return &analysis.Analyzer{
 		Name:     id,
@@ -64,7 +67,7 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 			for _, instr := range block.Instrs {
 				switch instr := instr.(type) {
 				case *ssa.Alloc:
-					sliceCap, err := extractSliceCapFromAlloc(instr.String())
+					sliceCap, err := extractSliceCapFromAlloc(instr)
 					if err != nil {
 						break
 					}
@@ -166,77 +169,27 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 				depth++
 				for _, instr := range block.Instrs {
 					if _, ok := issues[instr]; ok {
-						// Only consider removing issues if the length check is actually related to the slice being accessed
-						shouldRemoveIssue := false
 						switch bound {
 						case lowerUnbounded:
-							break
-						case upperUnbounded, unbounded:
-							if tinstr, ok := instr.(*ssa.IndexAddr); ok {
-								// Handle parameter slices
-								if param, ok := tinstr.X.(*ssa.Parameter); ok {
-									indexValue, err := extractIntValue(tinstr.Index.String())
-									if err != nil || indexValue > value {
-										break // problem found, do not delete issue
-									}
-									// Check if the length condition is actually on the same parameter
-									if isLengthConditionRelatedToSlice(binop, param) {
-										shouldRemoveIssue = true
-									}
-								}
-								// Handle named slice types (ChangeType)
-								if changeType, ok := tinstr.X.(*ssa.ChangeType); ok {
-									if param, ok := changeType.X.(*ssa.Parameter); ok {
-										indexValue, err := extractIntValue(tinstr.Index.String())
-										if err != nil || indexValue > value {
-											break // problem found, do not delete issue
-										}
-										// Check if the length condition is actually on the same parameter
-										if isLengthConditionRelatedToSlice(binop, param) {
-											shouldRemoveIssue = true
-										}
-									}
-								}
-								// Handle local slices (not parameters)
-								if !shouldRemoveIssue {
-									indexValue, err := extractIntValue(tinstr.Index.String())
-									if err == nil && indexValue <= value {
-										// Check if this instruction is actually in the protected block
-										shouldRemoveIssue = true
-									}
-								}
-							}
-							if shouldRemoveIssue {
-								delete(issues, instr)
-							}
-						case upperBounded:
+							// Temporarily add handling for lowerUnbounded case like other bounds
 							switch tinstr := instr.(type) {
-							case *ssa.Slice:
-								lower, upper := extractSliceBounds(tinstr)
-								if isSliceInsideBounds(0, value, lower, upper) {
+							case *ssa.IndexAddr:
+								if shouldRemoveIssueForBounds(tinstr, binop, bound, value) {
 									delete(issues, instr)
 								}
-							case *ssa.IndexAddr:
-								indexValue, err := extractIntValue(tinstr.Index.String())
-								if err != nil {
-									break
-								}
-								// For unknown capacity slices with length checks, allow access within validated range
-								if value > indexValue {
-									// Check if the length condition is actually related to the slice being accessed
-									if param, ok := tinstr.X.(*ssa.Parameter); ok {
-										if isLengthConditionRelatedToSlice(binop, param) {
-											delete(issues, instr)
-										}
-									} else if changeType, ok := tinstr.X.(*ssa.ChangeType); ok {
-										if param, ok := changeType.X.(*ssa.Parameter); ok {
-											if isLengthConditionRelatedToSlice(binop, param) {
-												delete(issues, instr)
-											}
-										}
-									} else {
+							}
+						case upperUnbounded, unbounded, upperBounded:
+							switch tinstr := instr.(type) {
+							case *ssa.Slice:
+								if bound == upperBounded {
+									lower, upper := extractSliceBounds(tinstr)
+									if isSliceInsideBounds(0, value, lower, upper) {
 										delete(issues, instr)
 									}
+								}
+							case *ssa.IndexAddr:
+								if shouldRemoveIssueForBounds(tinstr, binop, bound, value) {
+									delete(issues, instr)
 								}
 							}
 						}
@@ -498,22 +451,36 @@ func extractIntValue(value string) (int, error) {
 	return strconv.Atoi(parts[0])
 }
 
-func extractSliceCapFromAlloc(instr string) (int, error) {
-	re := regexp.MustCompile(`new \[(\d+)\]*`)
-	var sliceCap int
-	matches := re.FindAllStringSubmatch(instr, -1)
-	if matches == nil {
-		return sliceCap, errors.New("no slice cap found")
+func extractSliceCapFromString(allocString string) (int, error) {
+	matches := sliceCapRegex.FindAllStringSubmatch(allocString, -1)
+	if len(matches) != 1 {
+		return 0, fmt.Errorf("expected exactly 1 slice cap match, found %d", len(matches))
 	}
-
-	if len(matches) > 0 {
-		m := matches[0]
-		if len(m) > 1 {
-			return strconv.Atoi(m[1])
-		}
+	m := matches[0]
+	if len(m) <= 1 {
+		return 0, errors.New("regex matched but failed to capture slice capacity")
 	}
+	return strconv.Atoi(m[1])
+}
 
-	return 0, errors.New("no slice cap found")
+func extractSliceCapFromAlloc(a *ssa.Alloc) (int, error) {
+	return extractSliceCapFromString(a.String())
+}
+
+func extractSliceLenFromString(sliceString string) (int, error) {
+	matches := sliceLenRegex.FindAllStringSubmatch(sliceString, -1)
+	if len(matches) != 1 {
+		return 0, fmt.Errorf("expected exactly 1 slice len match, found %d", len(matches))
+	}
+	m := matches[0]
+	if len(m) <= 1 {
+		return 0, errors.New("regex matched but failed to capture slice length")
+	}
+	return strconv.Atoi(m[1])
+}
+
+func extractSliceLenFromSlice(s *ssa.Slice) (int, error) {
+	return extractSliceLenFromString(s.String())
 }
 
 func isSliceType(t types.Type) bool {
@@ -574,7 +541,7 @@ func isLengthConditionRelatedToSlice(binop *ssa.BinOp, param *ssa.Parameter) boo
 	// Check if X is a len() call on the parameter
 	if call, ok := binop.X.(*ssa.Call); ok {
 		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
-			if len(call.Call.Args) > 0 && call.Call.Args[0] == param {
+			if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == param {
 				lenCall = call
 			}
 		}
@@ -583,7 +550,7 @@ func isLengthConditionRelatedToSlice(binop *ssa.BinOp, param *ssa.Parameter) boo
 	// Check if Y is a len() call on the parameter
 	if call, ok := binop.Y.(*ssa.Call); ok {
 		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
-			if len(call.Call.Args) > 0 && call.Call.Args[0] == param {
+			if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == param {
 				lenCall = call
 			}
 		}
@@ -614,6 +581,289 @@ func isLengthConditionRelatedToSlice(binop *ssa.BinOp, param *ssa.Parameter) boo
 				}
 			}
 		}
+	}
+	return false
+}
+
+// checkConditionApplies checks if a binary operation condition applies to a parameter slice
+// This checks if the binary operation directly involves len() of the specified parameter
+func checkConditionApplies(binop *ssa.BinOp, param *ssa.Parameter) bool {
+	// Check if either side of the binary operation is a len() call on the parameter
+	if call, ok := binop.X.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == param {
+				return true
+			}
+		}
+	}
+
+	if call, ok := binop.Y.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == param {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// getSliceSource traces back to find the original slice source (Alloc, Parameter, etc.)
+func getSliceSource(v ssa.Value) ssa.Value {
+	for {
+		switch val := v.(type) {
+		case *ssa.ChangeType:
+			v = val.X
+		case *ssa.Slice:
+			v = val.X
+		default:
+			return v
+		}
+	}
+}
+
+// evaluateExactCondition evaluates a len() condition with exact slice bounds
+// Returns true if condition is true, false if false, nil if cannot evaluate exactly
+func evaluateExactCondition(binop *ssa.BinOp, sliceSource ssa.Value, exactLength int) *bool {
+	var lenCall *ssa.Call
+	var constValue int
+	var hasConstant bool
+
+	// Check if X is a len() call on the slice and Y is a constant
+	if call, ok := binop.X.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == sliceSource {
+				lenCall = call
+				if y, ok := binop.Y.(*ssa.Const); ok {
+					if val, err := strconv.Atoi(y.Value.String()); err == nil {
+						constValue = val
+						hasConstant = true
+					}
+				}
+			}
+		}
+	}
+
+	// Check if Y is a len() call on the slice and X is a constant
+	if lenCall == nil {
+		if call, ok := binop.Y.(*ssa.Call); ok {
+			if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+				if len(call.Call.Args) > 0 && getSliceSource(call.Call.Args[0]) == sliceSource {
+					lenCall = call
+					if x, ok := binop.X.(*ssa.Const); ok {
+						if val, err := strconv.Atoi(x.Value.String()); err == nil {
+							constValue = val
+							hasConstant = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if lenCall == nil || !hasConstant {
+		return nil // Cannot evaluate exactly
+	}
+
+	// Evaluate the condition with exact length
+	switch binop.Op {
+	case token.LSS: // len(s) < N or N < len(s)
+		if binop.X == lenCall {
+			result := exactLength < constValue
+			return &result
+		} else {
+			result := constValue < exactLength
+			return &result
+		}
+	case token.LEQ: // len(s) <= N or N <= len(s)
+		if binop.X == lenCall {
+			result := exactLength <= constValue
+			return &result
+		} else {
+			result := constValue <= exactLength
+			return &result
+		}
+	case token.GTR: // len(s) > N or N > len(s)
+		if binop.X == lenCall {
+			result := exactLength > constValue
+			return &result
+		} else {
+			result := constValue > exactLength
+			return &result
+		}
+	case token.GEQ: // len(s) >= N or N >= len(s)
+		if binop.X == lenCall {
+			result := exactLength >= constValue
+			return &result
+		} else {
+			result := constValue >= exactLength
+			return &result
+		}
+	case token.EQL: // len(s) == N or N == len(s)
+		result := exactLength == constValue
+		return &result
+	case token.NEQ: // len(s) != N or N != len(s)
+		result := exactLength != constValue
+		return &result
+	}
+
+	return nil
+}
+
+// processLocalSliceIssue handles bounds checking for locally-created slices (exact bounds known)
+func processLocalSliceIssue(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound, value int) bool {
+	indexValue, err := extractIntValue(ia.Index.String())
+	if err != nil {
+		return false
+	}
+	sliceSource := getSliceSource(ia.X)
+
+	// Try to get exact length from slice instruction if available
+	var exactLength int
+	if slice, ok := sliceSource.(*ssa.Slice); ok {
+		exactLength, err = extractSliceLenFromSlice(slice)
+		if err != nil {
+			// Fall back to capacity from alloc if slice length extraction fails
+			if alloc, ok := slice.X.(*ssa.Alloc); ok {
+				exactLength, err = extractSliceCapFromAlloc(alloc)
+				if err != nil {
+					return shouldFallBackToHeuristic(indexValue, bound, value)
+				}
+			} else {
+				return shouldFallBackToHeuristic(indexValue, bound, value)
+			}
+		}
+	} else if alloc, ok := sliceSource.(*ssa.Alloc); ok {
+		// For direct alloc access, use capacity as length
+		exactLength, err = extractSliceCapFromAlloc(alloc)
+		if err != nil {
+			return shouldFallBackToHeuristic(indexValue, bound, value)
+		}
+	} else {
+		return false // Not a local slice
+	}
+
+	// Use exact condition evaluation for local slices
+	if conditionResult := evaluateExactCondition(binop, sliceSource, exactLength); conditionResult != nil {
+		switch bound {
+		case lowerUnbounded:
+			if !*conditionResult {
+				return true // Unreachable code - condition is false
+			}
+			return indexValue < exactLength // Check exact bounds
+		case upperUnbounded, unbounded:
+			if !*conditionResult {
+				return true // Unreachable code - condition is false
+			}
+			return indexValue < exactLength // Check exact bounds
+		case upperBounded:
+			return *conditionResult && indexValue < exactLength
+		}
+	}
+
+	// Cannot evaluate condition exactly, fall back to heuristic
+	return shouldFallBackToHeuristic(indexValue, bound, value)
+}
+
+// processExternalSliceIssue handles bounds checking for external slices (parameters, unknown bounds)
+func processExternalSliceIssue(tinstr *ssa.IndexAddr, binop *ssa.BinOp, bound bound, value int) bool {
+	indexValue, err := extractIntValue(tinstr.Index.String())
+	if err != nil {
+		return false
+	}
+
+	// Check if the condition actually relates to this specific slice first
+	sliceSource := getSliceSource(tinstr.X)
+	var param *ssa.Parameter
+
+	if p, ok := sliceSource.(*ssa.Parameter); ok {
+		param = p
+	} else if changeType, ok := tinstr.X.(*ssa.ChangeType); ok {
+		if p, ok := changeType.X.(*ssa.Parameter); ok {
+			param = p
+		}
+	}
+
+	if param == nil {
+		return false // Not an external slice parameter
+	}
+
+	// Check if condition relates to this slice parameter
+	if !isConditionRelatedToExternalSlice(binop, param, bound) {
+		return false // Condition doesn't apply to this slice
+	}
+
+	// Now check bounds based on the condition type
+	switch bound {
+	case lowerUnbounded:
+		// len(s) > value means indices 0 through value are safe
+		return indexValue <= value
+	case upperUnbounded:
+		// len(s) < value means indices 0 through value-1 are potentially safe
+		return indexValue < value
+	case upperBounded:
+		// len(s) == value means indices 0 through value-1 are safe
+		return indexValue < value
+	case unbounded:
+		// len(s) != value - complex case, be conservative for now
+		return false
+	}
+
+	return false
+}
+
+// isConditionRelatedToExternalSlice checks if a condition applies to an external slice parameter
+func isConditionRelatedToExternalSlice(binop *ssa.BinOp, param *ssa.Parameter, bound bound) bool {
+	switch bound {
+	case lowerUnbounded:
+		return checkConditionApplies(binop, param)
+	case upperUnbounded, unbounded:
+		return isLengthConditionRelatedToSlice(binop, param)
+	case upperBounded:
+		return checkConditionApplies(binop, param)
+	default:
+		return false
+	}
+}
+
+// shouldFallBackToHeuristic provides heuristic bounds checking when exact evaluation fails
+func shouldFallBackToHeuristic(indexValue int, bound bound, value int) bool {
+	switch bound {
+	case upperUnbounded, unbounded:
+		return indexValue <= value
+	case upperBounded:
+		return value > indexValue
+	default:
+		return false
+	}
+}
+
+// isLocalSlice determines if a slice instruction refers to a locally-created slice
+func isLocalSlice(ia *ssa.IndexAddr) bool {
+	v := ia.X
+	if ct, ok := v.(*ssa.ChangeType); ok {
+		v = ct.X
+	}
+	_, ok := v.(*ssa.Alloc)
+	return ok
+}
+
+// isExternalSlice determines if a slice instruction refers to an external slice (parameter)
+func isExternalSlice(ia *ssa.IndexAddr) bool {
+	v := ia.X
+	if ct, ok := v.(*ssa.ChangeType); ok {
+		v = ct.X
+	}
+	_, ok := v.(*ssa.Parameter)
+	return ok
+}
+
+// Helper function to determine if an issue should be removed based on bounds checking
+func shouldRemoveIssueForBounds(ia *ssa.IndexAddr, binop *ssa.BinOp, bound bound, v int) bool {
+	if isLocalSlice(ia) {
+		return processLocalSliceIssue(ia, binop, bound, v)
+	} else if isExternalSlice(ia) {
+		return processExternalSliceIssue(ia, binop, bound, v)
 	}
 	return false
 }

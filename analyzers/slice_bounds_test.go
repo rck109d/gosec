@@ -1,0 +1,541 @@
+// (c) Copyright gosec's authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package analyzers
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"testing"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// allocsFromCode creates SSA from a Go code snippet and returns any *ssa.Alloc instructions found
+func allocsFromCode(code string) ([]*ssa.Alloc, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", code, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
+		Defs:  make(map[*ast.Ident]types.Object),
+		Uses:  make(map[*ast.Ident]types.Object),
+	}
+
+	conf := &types.Config{}
+	tpkg, err := conf.Check("test", fset, []*ast.File{file}, info)
+	if err != nil {
+		return nil, err
+	}
+
+	prog := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
+	ssaPkg := prog.CreatePackage(tpkg, []*ast.File{file}, info, false)
+	ssaPkg.Build()
+
+	var allocs []*ssa.Alloc
+	for _, member := range ssaPkg.Members {
+		if fn, ok := member.(*ssa.Function); ok {
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					if alloc, ok := instr.(*ssa.Alloc); ok {
+						allocs = append(allocs, alloc)
+					}
+				}
+			}
+		}
+	}
+
+	return allocs, nil
+}
+
+// slicesFromCode creates SSA from a Go code snippet and returns any *ssa.Slice instructions found
+func slicesFromCode(code string) ([]*ssa.Slice, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", code, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
+		Defs:  make(map[*ast.Ident]types.Object),
+		Uses:  make(map[*ast.Ident]types.Object),
+	}
+
+	conf := &types.Config{}
+	tpkg, err := conf.Check("test", fset, []*ast.File{file}, info)
+	if err != nil {
+		return nil, err
+	}
+
+	prog := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
+	ssaPkg := prog.CreatePackage(tpkg, []*ast.File{file}, info, false)
+	ssaPkg.Build()
+
+	var slices []*ssa.Slice
+	for _, member := range ssaPkg.Members {
+		if fn, ok := member.(*ssa.Function); ok {
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					if slice, ok := instr.(*ssa.Slice); ok {
+						slices = append(slices, slice)
+					}
+				}
+			}
+		}
+	}
+
+	return slices, nil
+}
+
+func TestExtractSliceCapFromString(t *testing.T) {
+	tests := []struct {
+		name        string
+		allocString string
+		expectedCap int
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "zero capacity slice",
+			allocString: "t0 = new [0]int",
+			expectedCap: 0,
+			expectError: false,
+		},
+		{
+			name:        "single capacity slice",
+			allocString: "t0 = new [1]int",
+			expectedCap: 1,
+			expectError: false,
+		},
+		{
+			name:        "small capacity slice",
+			allocString: "t0 = new [10]int",
+			expectedCap: 10,
+			expectError: false,
+		},
+		{
+			name:        "large capacity slice",
+			allocString: "t0 = new [1000]int",
+			expectedCap: 1000,
+			expectError: false,
+		},
+		{
+			name:        "very large capacity slice",
+			allocString: "t0 = new [999999]int",
+			expectedCap: 999999,
+			expectError: false,
+		},
+		{
+			name:        "no slice allocation",
+			allocString: "t0 = new int",
+			expectedCap: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice cap match, found 0",
+		},
+		{
+			name:        "invalid format",
+			allocString: "invalid allocation string",
+			expectedCap: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice cap match, found 0",
+		},
+		{
+			name:        "multiple array allocations",
+			allocString: "t0 = new [10]int, t1 = new [20]int",
+			expectedCap: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice cap match, found 2",
+		},
+		{
+			name:        "non-numeric capacity",
+			allocString: "t0 = new [abc]int",
+			expectedCap: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice cap match, found 0",
+		},
+		{
+			name:        "empty brackets",
+			allocString: "t0 = new []int",
+			expectedCap: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice cap match, found 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cap, err := extractSliceCapFromString(tt.allocString)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+					return
+				}
+				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
+					t.Errorf("expected error message '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if cap != tt.expectedCap {
+					t.Errorf("expected capacity %d, got %d", tt.expectedCap, cap)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractSliceLenFromString(t *testing.T) {
+	tests := []struct {
+		name        string
+		sliceString string
+		expectedLen int
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "zero length slice",
+			sliceString: "slice t0[:0:int]",
+			expectedLen: 0,
+			expectError: false,
+		},
+		{
+			name:        "single length slice",
+			sliceString: "slice t0[:1:int]",
+			expectedLen: 1,
+			expectError: false,
+		},
+		{
+			name:        "small length slice",
+			sliceString: "slice t0[:5:int]",
+			expectedLen: 5,
+			expectError: false,
+		},
+		{
+			name:        "large length slice",
+			sliceString: "slice t0[:100:int]",
+			expectedLen: 100,
+			expectError: false,
+		},
+		{
+			name:        "slice with different variable name",
+			sliceString: "slice t1[:25:int]",
+			expectedLen: 25,
+			expectError: false,
+		},
+		{
+			name:        "no slice operation",
+			sliceString: "t0 = new int",
+			expectedLen: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice len match, found 0",
+		},
+		{
+			name:        "invalid format",
+			sliceString: "invalid slice string",
+			expectedLen: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice len match, found 0",
+		},
+		{
+			name:        "multiple slice operations",
+			sliceString: "slice t0[:5:int], slice t1[:10:int]",
+			expectedLen: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice len match, found 2",
+		},
+		{
+			name:        "non-numeric length",
+			sliceString: "slice t0[:abc:int]",
+			expectedLen: 0,
+			expectError: true,
+			errorMsg:    "expected exactly 1 slice len match, found 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			length, err := extractSliceLenFromString(tt.sliceString)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+					return
+				}
+				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
+					t.Errorf("expected error message '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if length != tt.expectedLen {
+					t.Errorf("expected length %d, got %d", tt.expectedLen, length)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractSliceLenFromSliceWithRealSSA(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        string
+		expectedLen int
+		expectError bool
+	}{
+		{
+			name: "zero length slice",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 0, 5)
+	return s
+}`,
+			expectedLen: 0,
+			expectError: false,
+		},
+		{
+			name: "small length slice",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 3, 10)
+	return s
+}`,
+			expectedLen: 3,
+			expectError: false,
+		},
+		{
+			name: "slice with same length and capacity",
+			code: `
+package test
+func test() []int {
+	s := make([]int, 7)
+	return s
+}`,
+			expectedLen: 7,
+			expectError: false,
+		},
+		{
+			name: "named type slice",
+			code: `
+package test
+type IntSlice []int
+func test() IntSlice {
+	s := make(IntSlice, 5, 10)
+	return s
+}`,
+			expectedLen: 5,
+			expectError: false,
+		},
+		{
+			name: "multi-declaration line",
+			code: `
+package test
+func test() ([]int, []string) {
+	s1, s2 := make([]int, 3, 8), make([]string, 7, 12)
+	return s1, s2
+}`,
+			expectedLen: 3,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slices, err := slicesFromCode(tt.code)
+			if err != nil {
+				t.Fatalf("failed to create SSA: %v", err)
+			}
+
+			if len(slices) == 0 {
+				t.Fatal("no slice instructions found in SSA")
+			}
+
+			length, err := extractSliceLenFromSlice(slices[0])
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if length != tt.expectedLen {
+					t.Errorf("expected length %d, got %d", tt.expectedLen, length)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractSliceLenFromMultiDeclaration(t *testing.T) {
+	code := `
+package test
+func test() ([]int, []string) {
+	s1, s2 := make([]int, 3, 8), make([]string, 7, 12)
+	return s1, s2
+}`
+	slices, err := slicesFromCode(code)
+	if err != nil {
+		t.Fatalf("failed to create SSA: %v", err)
+	}
+
+	if len(slices) < 2 {
+		t.Fatalf("expected at least 2 slice instructions, found %d", len(slices))
+	}
+
+	// Test the first slice (make([]int, 3, 8))
+	length1, err := extractSliceLenFromSlice(slices[0])
+	if err != nil {
+		t.Errorf("unexpected error for first slice: %v", err)
+	} else if length1 != 3 {
+		t.Errorf("expected length 3 for first slice, got %d", length1)
+	}
+
+	// Test the second slice (make([]string, 7, 12))
+	length2, err := extractSliceLenFromSlice(slices[1])
+	if err != nil {
+		t.Errorf("unexpected error for second slice: %v", err)
+	} else if length2 != 7 {
+		t.Errorf("expected length 7 for second slice, got %d", length2)
+	}
+}
+
+func TestExtractSliceCapFromAllocWithRealSSA(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        string
+		expectedCap int
+		expectError bool
+	}{
+		{
+			name: "zero capacity array",
+			code: `
+package test
+func test() *[0]int {
+	return new([0]int)
+}`,
+			expectedCap: 0,
+			expectError: false,
+		},
+		{
+			name: "small capacity array",
+			code: `
+package test
+func test() *[5]int {
+	return new([5]int)
+}`,
+			expectedCap: 5,
+			expectError: false,
+		},
+		{
+			name: "large capacity array",
+			code: `
+package test
+func test() *[100]int {
+	return new([100]int)
+}`,
+			expectedCap: 100,
+			expectError: false,
+		},
+		{
+			name: "named type backed by array",
+			code: `
+package test
+type MyArray [25]int
+func test() *MyArray {
+	return new(MyArray)
+}`,
+			expectedCap: 0,
+			expectError: true,
+		},
+		{
+			name: "named type backed by slice",
+			code: `
+package test
+type MySlice []int
+func test() MySlice {
+	return make(MySlice, 0)
+}`,
+			expectedCap: 0,
+			expectError: false,
+		},
+		{
+			name: "nested named type backed by slice",
+			code: `
+package test
+type BaseSlice []string
+type MySlice BaseSlice
+func test() MySlice {
+	return make(MySlice, 0)
+}`,
+			expectedCap: 0,
+			expectError: false,
+		},
+		{
+			name: "named type with slice allocation",
+			code: `
+package test
+type IntSlice []int
+func test() IntSlice {
+	s := make(IntSlice, 5, 10)
+	return s
+}`,
+			expectedCap: 10,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allocs, err := allocsFromCode(tt.code)
+			if err != nil {
+				t.Fatalf("failed to create SSA: %v", err)
+			}
+
+			if len(allocs) == 0 {
+				t.Fatal("no allocations found in SSA")
+			}
+
+			cap, err := extractSliceCapFromAlloc(allocs[0])
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if cap != tt.expectedCap {
+					t.Errorf("expected capacity %d, got %d", tt.expectedCap, cap)
+				}
+			}
+		})
+	}
+}
