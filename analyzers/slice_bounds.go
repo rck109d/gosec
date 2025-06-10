@@ -166,27 +166,49 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 				depth++
 				for _, instr := range block.Instrs {
 					if _, ok := issues[instr]; ok {
+						// Only consider removing issues if the length check is actually related to the slice being accessed
+						shouldRemoveIssue := false
 						switch bound {
 						case lowerUnbounded:
 							break
 						case upperUnbounded, unbounded:
 							if tinstr, ok := instr.(*ssa.IndexAddr); ok {
 								// Handle parameter slices
-								if _, ok := tinstr.X.(*ssa.Parameter); ok {
+								if param, ok := tinstr.X.(*ssa.Parameter); ok {
 									indexValue, err := extractIntValue(tinstr.Index.String())
 									if err != nil || indexValue > value {
 										break // problem found, do not delete issue
+									}
+									// Check if the length condition is actually on the same parameter
+									if isLengthConditionRelatedToSlice(binop, param) {
+										shouldRemoveIssue = true
 									}
 								}
 								// Handle named slice types (ChangeType)
-								if _, ok := tinstr.X.(*ssa.ChangeType); ok {
+								if changeType, ok := tinstr.X.(*ssa.ChangeType); ok {
+									if param, ok := changeType.X.(*ssa.Parameter); ok {
+										indexValue, err := extractIntValue(tinstr.Index.String())
+										if err != nil || indexValue > value {
+											break // problem found, do not delete issue
+										}
+										// Check if the length condition is actually on the same parameter
+										if isLengthConditionRelatedToSlice(binop, param) {
+											shouldRemoveIssue = true
+										}
+									}
+								}
+								// Handle local slices (not parameters)
+								if !shouldRemoveIssue {
 									indexValue, err := extractIntValue(tinstr.Index.String())
-									if err != nil || indexValue > value {
-										break // problem found, do not delete issue
+									if err == nil && indexValue <= value {
+										// Check if this instruction is actually in the protected block
+										shouldRemoveIssue = true
 									}
 								}
 							}
-							delete(issues, instr)
+							if shouldRemoveIssue {
+								delete(issues, instr)
+							}
 						case upperBounded:
 							switch tinstr := instr.(type) {
 							case *ssa.Slice:
@@ -201,7 +223,20 @@ func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
 								}
 								// For unknown capacity slices with length checks, allow access within validated range
 								if value > indexValue {
-									delete(issues, instr)
+									// Check if the length condition is actually related to the slice being accessed
+									if param, ok := tinstr.X.(*ssa.Parameter); ok {
+										if isLengthConditionRelatedToSlice(binop, param) {
+											delete(issues, instr)
+										}
+									} else if changeType, ok := tinstr.X.(*ssa.ChangeType); ok {
+										if param, ok := changeType.X.(*ssa.Parameter); ok {
+											if isLengthConditionRelatedToSlice(binop, param) {
+												delete(issues, instr)
+											}
+										}
+									} else {
+										delete(issues, instr)
+									}
 								}
 							}
 						}
@@ -527,5 +562,58 @@ func isLikelyRangeLoop(param *ssa.Parameter) bool {
 		}
 	}
 
+	// Only consider it a range loop if BOTH conditions are met
+	// The presence of len() alone (e.g., in defer statements for logging) should not qualify
 	return hasLenCall && hasRangeIndex
+}
+
+func isLengthConditionRelatedToSlice(binop *ssa.BinOp, param *ssa.Parameter) bool {
+	// Check if the binary operation involves len() of the same parameter
+	var lenCall *ssa.Call
+
+	// Check if X is a len() call on the parameter
+	if call, ok := binop.X.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 && call.Call.Args[0] == param {
+				lenCall = call
+			}
+		}
+	}
+
+	// Check if Y is a len() call on the parameter
+	if call, ok := binop.Y.(*ssa.Call); ok {
+		if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Call.Args) > 0 && call.Call.Args[0] == param {
+				lenCall = call
+			}
+		}
+	}
+
+	// If lenCall is found, ensure the condition is related to the slice access
+	if lenCall != nil {
+		refs := lenCall.Referrers()
+		if refs != nil {
+			for _, ref := range *refs {
+				if binop, ok := ref.(*ssa.BinOp); ok {
+					binoprefs := binop.Referrers()
+					for _, ref := range *binoprefs {
+						if ifref, ok := ref.(*ssa.If); ok {
+							// Ensure the if condition is directly related to the slice access
+							if ifref.Cond == binop {
+								// Check if the slice access is within the same block as the if condition
+								for _, instr := range ifref.Block().Instrs {
+									if indexAddr, ok := instr.(*ssa.IndexAddr); ok {
+										if indexAddr.X == param {
+											return true
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
 }

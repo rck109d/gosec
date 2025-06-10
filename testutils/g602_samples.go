@@ -1130,4 +1130,61 @@ func main() {
 	}
 }
 `}, 0, gosec.NewConfig()},
+	// Function accepting slice parameter accessing index 0 without bounds check
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5)
+	foo(s)
+}
+
+func foo(s []int) {
+	fmt.Println(s[0]) // potential out of bounds - no length check
+}
+`}, 1, gosec.NewConfig()},
+	// Package variable condition with unguarded slice access
+	{[]string{`
+package main
+
+import "fmt"
+
+var shouldProcess bool = true
+
+func main() {
+	s := make([]int, 5)
+	foo(s)
+}
+
+func foo(s []int) {
+	if shouldProcess {
+		fmt.Println(s[10]) // out of bounds access inside unrelated condition
+	}
+}
+`}, 1, gosec.NewConfig()},
+	// Function with len() call for metrics but unguarded slice access (mimics real-world scenario)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	cacheEntries := make([]*string, 5)
+	updateCache(cacheEntries)
+}
+
+func updateCache(cacheEntriesToUpdate []*string) {
+	defer func() {
+		// len() used in metrics/logging - unrelated to bounds checking
+		fmt.Printf("processed %d entries", len(cacheEntriesToUpdate))
+	}()
+	
+	if true { // some unrelated condition
+		entry := cacheEntriesToUpdate[0] // potential out of bounds - no length check
+		fmt.Printf("processing entry: %v", entry)
+	}
+}
+`}, 1, gosec.NewConfig()},
 }
