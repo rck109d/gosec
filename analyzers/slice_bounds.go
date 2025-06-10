@@ -442,12 +442,23 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 			isExact:      false,
 		}
 	case upperUnbounded: // len(s) < value
-		// len(s) < value means slice length is at most value-1, so no indices are guaranteed safe
-		// For parameter slices, we can't assume any access is safe unless proven otherwise
-		conditionBounds = BoundInfo{
-			minSafeIndex: 0,
-			maxSafeIndex: 0, // No indices are guaranteed safe for parameter slices
-			isExact:      false,
+		// len(s) < value means slice length is at most value-1
+		// For parameter slices, we can't assume any access is safe unless we have
+		// existing bounds from parent scopes that guarantee safety
+		if existing.maxSafeIndex > 0 {
+			// We have existing guarantees, so intersect with the upper bound
+			conditionBounds = BoundInfo{
+				minSafeIndex: 0,
+				maxSafeIndex: value, // value is the exclusive upper bound for len(s) < value
+				isExact:      false,
+			}
+		} else {
+			// No existing guarantees for parameter slices with upper bounds
+			conditionBounds = BoundInfo{
+				minSafeIndex: 0,
+				maxSafeIndex: 0, // No indices are guaranteed safe for parameter slices
+				isExact:      false,
+			}
 		}
 	case upperBounded: // len(s) == value
 		// len(s) == value means indices 0 through value-1 are exactly safe
@@ -475,21 +486,25 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 		return conditionBounds
 	}
 
-	// For lower bounds (len(s) > N), take the stronger guarantee (larger N)
-	// For upper bounds (len(s) < N), take the intersection (more restrictive)
+	// Combine bounds based on the type of condition
 	switch bound {
 	case lowerUnbounded:
-		// len(s) > value means we have a minimum guarantee
-		// Take the stronger guarantee (larger minimum)
-		if conditionBounds.maxSafeIndex > existing.maxSafeIndex {
-			return conditionBounds
-		} else {
-			return existing
-		}
-	default:
-		// For other bounds types, take intersection (more restrictive)
+		// len(s) > N: This provides a minimum guarantee, so take the stronger (larger) bound
+		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
+		newBounds.maxSafeIndex = max(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+	case upperUnbounded, upperBounded:
+		// len(s) <= N or len(s) == N: This provides a maximum constraint, so take intersection
 		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
 		newBounds.maxSafeIndex = min(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+	default:
+		// For other bound types, take intersection (more restrictive)
+		newBounds.minSafeIndex = max(existing.minSafeIndex, conditionBounds.minSafeIndex)
+		newBounds.maxSafeIndex = min(existing.maxSafeIndex, conditionBounds.maxSafeIndex)
+	}
+
+	// Ensure bounds are valid (minSafeIndex <= maxSafeIndex)
+	if newBounds.maxSafeIndex < newBounds.minSafeIndex {
+		newBounds.maxSafeIndex = newBounds.minSafeIndex
 	}
 
 	// Debug output to trace bounds refinement
