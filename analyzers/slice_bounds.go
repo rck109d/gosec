@@ -274,7 +274,6 @@ func (ctx *ScopeContext) WithScope(parent *SliceScopeState, fn func(*SliceScopeS
 // WithCondition creates a new scope with updated bounds based on a condition
 func (ctx *ScopeContext) WithCondition(parent *SliceScopeState, condition *ssa.BinOp, conditionTrue bool, fn func(*SliceScopeState)) *SliceScopeState {
 	return ctx.WithScope(parent, func(scope *SliceScopeState) {
-		// Update bounds based on the condition
 		ctx.applyConditionToBounds(scope, condition, conditionTrue)
 		fn(scope)
 	})
@@ -507,9 +506,17 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	}
 
 	// Ensure bounds are valid (minSafeIndex <= minUnsafeIndex)
-	if newBounds.minUnsafeIndex < newBounds.minSafeIndex {
-		newBounds.minUnsafeIndex = newBounds.minSafeIndex
+	// Handle sentinel values: -1 means "unknown" or "no safe indices"
+	if newBounds.minSafeIndex >= 0 && newBounds.minUnsafeIndex >= 0 {
+		// Both bounds are known - ensure they're valid
+		if newBounds.minUnsafeIndex < newBounds.minSafeIndex {
+			newBounds.minUnsafeIndex = newBounds.minSafeIndex
+		}
 	}
+	// For all other cases involving sentinel values (-1), keep them as is:
+	// - Known safe index but unknown unsafe index: valid (we know some are safe, unknown upper bound)
+	// - Unknown safe index but known unsafe index: valid (parameter slice with upper bound condition)
+	// - Both unknown: valid (uninitialized parameter slice)
 
 	// Debug output to trace bounds refinement
 	debugf("REFINE: existing=[%d,%d), condition=[%d,%d), result=[%d,%d)\n",
