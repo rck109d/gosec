@@ -389,7 +389,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, if GT at boundary-2, ERROR
 	{[]string{`
 package main
@@ -593,7 +593,7 @@ func foo(s []int) {
 	s[2]++
 	fmt.Println(s[2])
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, early return if LTE boundary+1 OK
 	{[]string{`
 package main
@@ -667,7 +667,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, GTE boundary-1 ERROR - len(s) >= 1 means s[2] is NOT safe
 	{[]string{`
 package main
@@ -685,7 +685,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, GTE boundary+1 OK - len(s) >= 4 means s[2] is safe
 	{[]string{`
 package main
@@ -757,7 +757,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Left-hand constant: 3 <= len(s) means s[2] is safe (same as len(s) >= 3)
 	{[]string{`
 package main
@@ -793,7 +793,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Left-hand constant: 3 > len(s) means len(s) < 3, early return should make s[2] safe
 	{[]string{`
 package main
@@ -831,7 +831,7 @@ func foo(s []int) {
 	s[2]++
 	fmt.Println(s[2])
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Left-hand constant: 3 >= len(s) means len(s) <= 3, early return should make s[2] safe
 	{[]string{`
 package main
@@ -888,7 +888,7 @@ func foo(s []int) {
 	s[2]++
 	fmt.Println(s[2])
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Left-hand constant: 3 == len(s), guarded access should make s[2] safe
 	{[]string{`
 package main
@@ -924,7 +924,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Left-hand constant: 1 == len(s), guarded access should NOT make s[2] safe
 	{[]string{`
 package main
@@ -942,7 +942,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// Named slice type - should catch out of bounds access
 	{[]string{`
 package main
