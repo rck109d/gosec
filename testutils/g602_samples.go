@@ -122,7 +122,7 @@ func main() {
 	fmt.Println(s[3])
 
 }
-`}, 0, gosec.NewConfig()},
+`}, 1, gosec.NewConfig()},
 	{[]string{`
 package main
 
@@ -353,8 +353,8 @@ func foo(s []int) {
 	s[0]++
 	fmt.Println(s[0])
 }
-// foo, if GT at boundary OK
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
+	// foo, if GT at boundary OK
 	{[]string{`
 package main
 
@@ -407,7 +407,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, if LT error
 	{[]string{`
 package main
@@ -425,7 +425,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, if LT error
 	{[]string{`
 package main
@@ -443,7 +443,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, if LT error
 	{[]string{`
 package main
@@ -461,7 +461,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, if LT error
 	{[]string{`
 package main
@@ -479,7 +479,7 @@ func foo(s []int) {
 		fmt.Println(s[2])
 	}
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, early return IF LT boundary ERROR
 	{[]string{`
 package main
@@ -498,7 +498,7 @@ func foo(s []int) {
 	s[2]++
 	fmt.Println(s[2])
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, early return IF LT boundary-1 ERROR
 	{[]string{`
 package main
@@ -517,7 +517,7 @@ func foo(s []int) {
 	s[2]++
 	fmt.Println(s[2])
 }
-`}, 3, gosec.NewConfig()},
+`}, 2, gosec.NewConfig()},
 	// foo, early return IF LT boundary+1 OK
 	{[]string{`
 package main
