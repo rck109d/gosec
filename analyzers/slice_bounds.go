@@ -241,8 +241,8 @@ type SliceScopeState struct {
 
 // BoundInfo represents what we know about a slice's bounds
 type BoundInfo struct {
-	safeLen    uint // Guaranteed safe length - can access indices [0,safeLen)
-	safeCap    uint // Guaranteed safe capacity - can slice [0:safeCap]
+	safeLen    int  // Guaranteed safe length - can access indices [0,safeLen)
+	safeCap    int  // Guaranteed safe capacity - can slice [0:safeCap]
 	isLenExact bool // Whether length bounds are exact=true (local slice) or conservative=false (parameter)
 	isCapExact bool // Whether capacity bounds are exact=true (local slice) or conservative=false (parameter)
 }
@@ -384,22 +384,22 @@ func (ctx *ScopeContext) checkSliceOperation(scope *SliceScopeState, slice *ssa.
 
 	// Create bounds info for the resulting slice
 	// Calculate safe length and capacity for the resulting slice
-	var newSafeLen uint
-	var newSafeCap uint
+	var newSafeLen int
+	var newSafeCap int
 
 	if slice.High != nil {
 		// Explicit high bound: safe length is high - low
-		newSafeLen = uint(max(0, high-low))
-		newSafeCap = uint(max(0, high-low)) // For regular slices, length = capacity
+		newSafeLen = max(0, high-low)
+		newSafeCap = max(0, high-low) // For regular slices, length = capacity
 	} else {
 		// Implicit high bound: safe length is min(original length - low, original capacity - low)
 		if bounds.safeLen > 0 {
-			newSafeLen = uint(max(0, int(bounds.safeLen)-low))
+			newSafeLen = max(0, bounds.safeLen-low)
 		} else {
 			newSafeLen = 0 // Unknown safe length
 		}
 		if bounds.safeCap > 0 {
-			newSafeCap = uint(max(0, int(bounds.safeCap)-low))
+			newSafeCap = max(0, bounds.safeCap-low)
 		} else {
 			newSafeCap = 0 // Unknown safe capacity
 		}
@@ -450,8 +450,8 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	case lowerUnbounded: // len(s) > value
 		// len(s) > value means indices 0 through value are definitely safe
 		conditionBounds = BoundInfo{
-			safeLen:    uint(value + 1), // Safe to access indices 0 to value
-			safeCap:    uint(value + 1), // Capacity is at least length
+			safeLen:    value + 1, // Safe to access indices 0 to value
+			safeCap:    value + 1, // Capacity is at least length
 			isLenExact: false,
 			isCapExact: false,
 		}
@@ -462,7 +462,7 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 		if existing.safeLen > 0 {
 			// We have existing guarantees, so intersect with the upper bound
 			conditionBounds = BoundInfo{
-				safeLen:    uint(min(int(existing.safeLen), value-1)),
+				safeLen:    min(existing.safeLen, value-1),
 				safeCap:    existing.safeCap, // Capacity bounds don't change from length upper bounds
 				isLenExact: false,
 				isCapExact: existing.isCapExact,
@@ -479,8 +479,8 @@ func (ctx *ScopeContext) refineBounds(existing BoundInfo, bound bound, value int
 	case upperBounded: // len(s) == value
 		// len(s) == value means indices 0 through value-1 are exactly safe
 		conditionBounds = BoundInfo{
-			safeLen:    uint(value), // Can access indices 0 to value-1
-			safeCap:    uint(value), // For exact length, capacity is at least length
+			safeLen:    value, // Can access indices 0 to value-1
+			safeCap:    value, // For exact length, capacity is at least length
 			isLenExact: true,
 			isCapExact: false, // We don't know the exact capacity from length conditions
 		}
@@ -849,8 +849,8 @@ func processMakeSliceAlloc(alloc *ssa.Alloc) (BoundInfo, error) {
 
 	// For make() slices, we need to determine the actual length vs capacity
 	// Check for referrers to find the corresponding slice operation from make()
-	actualLen := uint(capacity) // Default to capacity if no slice operation found
-	actualCap := uint(capacity)
+	actualLen := capacity // Default to capacity if no slice operation found
+	actualCap := capacity
 
 	if refs := alloc.Referrers(); refs != nil {
 		for _, user := range *refs {
@@ -861,7 +861,7 @@ func processMakeSliceAlloc(alloc *ssa.Alloc) (BoundInfo, error) {
 				if slice.High != nil {
 					if highConst, ok := slice.High.(*ssa.Const); ok {
 						if lenVal, err := strconv.Atoi(highConst.Value.String()); err == nil {
-							actualLen = uint(lenVal)
+							actualLen = lenVal
 							break
 						}
 					}

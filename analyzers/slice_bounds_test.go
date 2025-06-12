@@ -831,8 +831,8 @@ func TestProcessMakeSliceAlloc(t *testing.T) {
 	tests := []struct {
 		name        string
 		code        string
-		expectedLen uint
-		expectedCap uint
+		expectedLen int
+		expectedCap int
 		expectError bool
 		errorMsg    string
 	}{
@@ -894,6 +894,18 @@ func main() {
 }`,
 			expectedLen: 50,
 			expectedCap: 200,
+			expectError: false,
+		},
+		{
+			name: "make slice with max size",
+			code: `
+package main
+func main() {
+	s := make([]struct{},9223372036854775807,9223372036854775807)
+	_ = s
+}`,
+			expectedLen: 9223372036854775807,
+			expectedCap: 9223372036854775807,
 			expectError: false,
 		},
 		{
