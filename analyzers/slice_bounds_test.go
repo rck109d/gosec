@@ -783,46 +783,6 @@ func test(input []int) []int {
 	})
 }
 
-// makeSliceInstructionsFromCode creates SSA from a Go code snippet and returns any *ssa.MakeSlice instructions found
-func makeSliceInstructionsFromCode(code string) ([]*ssa.MakeSlice, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "test.go", code, parser.ParseComments)
-	if err != nil {
-		return nil, err
-	}
-
-	info := &types.Info{
-		Types: make(map[ast.Expr]types.TypeAndValue),
-		Defs:  make(map[*ast.Ident]types.Object),
-		Uses:  make(map[*ast.Ident]types.Object),
-	}
-
-	conf := &types.Config{}
-	tpkg, err := conf.Check("test", fset, []*ast.File{file}, info)
-	if err != nil {
-		return nil, err
-	}
-
-	prog := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
-	ssaPkg := prog.CreatePackage(tpkg, []*ast.File{file}, info, false)
-	ssaPkg.Build()
-
-	var makeSlices []*ssa.MakeSlice
-	for _, member := range ssaPkg.Members {
-		if fn, ok := member.(*ssa.Function); ok {
-			for _, block := range fn.Blocks {
-				for _, instr := range block.Instrs {
-					if makeSlice, ok := instr.(*ssa.MakeSlice); ok {
-						makeSlices = append(makeSlices, makeSlice)
-					}
-				}
-			}
-		}
-	}
-
-	return makeSlices, nil
-}
-
 // allocsAndSlicesFromCode creates SSA from a Go code snippet and returns both *ssa.Alloc and *ssa.Slice instructions
 func allocsAndSlicesFromCode(code string) ([]*ssa.Alloc, []*ssa.Slice, error) {
 	fset := token.NewFileSet()
@@ -865,78 +825,6 @@ func allocsAndSlicesFromCode(code string) ([]*ssa.Alloc, []*ssa.Slice, error) {
 	}
 
 	return allocs, slices, nil
-}
-
-func TestProcessMakeSliceInstruction(t *testing.T) {
-	// Note: In practice, make() calls are compiled to *ssa.Alloc instructions, not *ssa.MakeSlice
-	// This test is kept for completeness but may not find actual MakeSlice instructions
-	// The real testing happens in TestProcessMakeSliceAlloc
-
-	tests := []struct {
-		name        string
-		code        string
-		expectedLen uint
-		expectedCap uint
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name: "direct MakeSlice instruction (rare)",
-			code: `
-package main
-func main() {
-	// This may not generate a MakeSlice instruction in practice
-	s := make([]int, 5)
-	_ = s
-}`,
-			expectedLen: 5,
-			expectedCap: 5,
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			makeSlices, err := makeSliceInstructionsFromCode(tt.code)
-			if err != nil {
-				t.Fatalf("failed to create SSA: %v", err)
-			}
-
-			if len(makeSlices) == 0 {
-				t.Skip("No MakeSlice instructions found - make() calls are typically compiled to Alloc instructions")
-				return
-			}
-
-			bounds, err := processMakeSliceInstruction(makeSlices[0])
-
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("expected error but got none")
-					return
-				}
-				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
-					t.Errorf("expected error message '%s', got '%s'", tt.errorMsg, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-					return
-				}
-				if bounds.safeLen != tt.expectedLen {
-					t.Errorf("expected length %d, got %d", tt.expectedLen, bounds.safeLen)
-				}
-				if bounds.safeCap != tt.expectedCap {
-					t.Errorf("expected capacity %d, got %d", tt.expectedCap, bounds.safeCap)
-				}
-				if !bounds.isLenExact {
-					t.Errorf("expected isLenExact to be true")
-				}
-				if !bounds.isCapExact {
-					t.Errorf("expected isCapExact to be true")
-				}
-			}
-		})
-	}
 }
 
 func TestProcessMakeSliceAlloc(t *testing.T) {
@@ -1084,8 +972,8 @@ func main() {
 			code: `
 package main
 func main() {
-	var arr [5]int
-	_ = arr
+	arr := [5]int{}
+	println(arr)
 }`,
 			expectError: true,
 		},
