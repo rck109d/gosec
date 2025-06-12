@@ -896,6 +896,28 @@ func main() {
 			expectedCap: 200,
 			expectError: false,
 		},
+		{
+			name: "non-slice alloc should error",
+			code: `
+package main
+func main() {
+	x := new(int)
+	_ = x
+}`,
+			expectError: true,
+			errorMsg:    "allocation is not for a slice (makeslice not found in allocation string)",
+		},
+		{
+			name: "array alloc should error",
+			code: `
+package main
+func main() {
+	arr := new([5]int)
+	_ = arr
+}`,
+			expectError: true,
+			errorMsg:    "allocation is not for a slice (makeslice not found in allocation string)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -905,20 +927,33 @@ func main() {
 				t.Fatalf("failed to create SSA: %v", err)
 			}
 
-			// Find the makeslice alloc (should contain "makeslice" in the string representation)
-			var makeSliceAlloc *ssa.Alloc
-			for _, alloc := range allocs {
-				if strings.Contains(alloc.String(), "makeslice") {
-					makeSliceAlloc = alloc
-					break
+			if len(allocs) == 0 {
+				if tt.expectError {
+					t.Skip("no allocs found - this is expected for some test cases")
+				} else {
+					t.Fatalf("no allocations found in SSA")
 				}
 			}
 
-			if makeSliceAlloc == nil {
-				t.Fatalf("no makeslice alloc found in SSA")
+			// For make slice tests, find the makeslice alloc
+			var targetAlloc *ssa.Alloc
+			if !tt.expectError {
+				// Find the makeslice alloc (should contain "makeslice" in the string representation)
+				for _, alloc := range allocs {
+					if strings.Contains(alloc.String(), "makeslice") {
+						targetAlloc = alloc
+						break
+					}
+				}
+				if targetAlloc == nil {
+					t.Fatalf("no makeslice alloc found in SSA")
+				}
+			} else {
+				// For error cases, use the first alloc
+				targetAlloc = allocs[0]
 			}
 
-			bounds, err := processMakeSliceAlloc(makeSliceAlloc)
+			bounds, err := processMakeSliceAlloc(targetAlloc)
 
 			if tt.expectError {
 				if err == nil {
@@ -944,62 +979,6 @@ func main() {
 				}
 				if !bounds.isCapExact {
 					t.Errorf("expected isCapExact to be true")
-				}
-			}
-		})
-	}
-}
-
-func TestProcessMakeSliceAllocEdgeCases(t *testing.T) {
-	tests := []struct {
-		name        string
-		code        string
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name: "non-slice alloc should error",
-			code: `
-package main
-func main() {
-	x := new(int)
-	_ = x
-}`,
-			expectError: true,
-		},
-		{
-			name: "array alloc should error",
-			code: `
-package main
-func main() {
-	arr := [5]int{}
-	println(arr)
-}`,
-			expectError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			allocs, _, err := allocsAndSlicesFromCode(tt.code)
-			if err != nil {
-				t.Fatalf("failed to create SSA: %v", err)
-			}
-
-			if len(allocs) == 0 {
-				t.Skip("no allocs found - this is expected for some test cases")
-			}
-
-			// Try to process the first alloc
-			_, err = processMakeSliceAlloc(allocs[0])
-
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("expected error but got none")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
 				}
 			}
 		})

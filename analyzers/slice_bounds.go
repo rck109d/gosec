@@ -836,6 +836,12 @@ func runSliceBoundsWithClosures(pass *analysis.Pass) (interface{}, error) {
 // processMakeSliceAlloc processes an *ssa.Alloc instruction that represents a make() slice operation
 // and returns the BoundInfo for the slice. This function is extracted for better testability.
 func processMakeSliceAlloc(alloc *ssa.Alloc) (BoundInfo, error) {
+	// Validate that this allocation is for a slice (from make() call), not an array
+	allocString := alloc.String()
+	if !strings.Contains(allocString, "makeslice") {
+		return BoundInfo{}, errors.New("allocation is not for a slice (makeslice not found in allocation string)")
+	}
+
 	capacity, err := extractSliceCapFromAlloc(alloc)
 	if err != nil {
 		return BoundInfo{}, err
