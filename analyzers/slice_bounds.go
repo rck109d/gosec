@@ -636,73 +636,22 @@ func (ctx *ScopeContext) processBlockWithScopeRecursive(scope *SliceScopeState, 
 		case *ssa.Alloc:
 			// Create bounds for local slices
 			debugf("Processing Alloc: %v", instr)
-			if capacity, err := extractSliceCapFromAlloc(instr); err == nil {
-				debugf("Extracted capacity from Alloc: %d", capacity)
-
-				// For make() slices, we need to determine the actual length vs capacity
-				// Check for referrers to find the corresponding slice operation from make()
-				actualLen := uint(capacity) // Default to capacity if no slice operation found
-				actualCap := uint(capacity)
-
-				if refs := instr.Referrers(); refs != nil {
-					for _, user := range *refs {
-						if slice, ok := user.(*ssa.Slice); ok {
-							// This slice operation represents the initialization from make()
-							// For make([]T, len, cap), the initialization slice is t0[:len:cap]
-							// The High field contains the actual length
-							if slice.High != nil {
-								if highConst, ok := slice.High.(*ssa.Const); ok {
-									if lenVal, err := strconv.Atoi(highConst.Value.String()); err == nil {
-										actualLen = uint(lenVal)
-										debugf("Found slice operation with length %d for alloc %v", lenVal, instr)
-										break
-									}
-								}
-							} else if slice.Low == nil {
-								// Case: slice t0[:] - this means full slice, length = capacity
-								actualLen = actualCap
-								debugf("Found full slice operation for alloc %v, length = capacity = %d", instr, actualCap)
-								break
-							}
-						}
-					}
-				}
-
-				bounds := BoundInfo{
-					safeLen:    actualLen,
-					safeCap:    actualCap,
-					isLenExact: true,
-					isCapExact: true,
+			if bounds, err := processMakeSliceAlloc(instr); err == nil {
+				debugf("Extracted capacity from Alloc: %d", bounds.safeCap)
+				if bounds.safeLen != bounds.safeCap {
+					debugf("Found slice operation with length %d for alloc %v", bounds.safeLen, instr)
+				} else {
+					debugf("Found full slice operation for alloc %v, length = capacity = %d", instr, bounds.safeCap)
 				}
 				debugf("Setting bounds for Alloc %v: %+v", instr, bounds)
 				scope.safeBounds[instr] = bounds
-
 			}
 
 		case *ssa.MakeSlice:
 			// MakeSlice creates a new slice - just set up bounds, no error checking needed
-			if lenArg, ok := instr.Len.(*ssa.Const); ok {
-				if lenVal, err := strconv.Atoi(lenArg.Value.String()); err == nil {
-					capVal := lenVal // Default capacity equals length
-
-					// Check if capacity is explicitly provided
-					if instr.Cap != nil {
-						if capArg, ok := instr.Cap.(*ssa.Const); ok {
-							if capConstVal, err := strconv.Atoi(capArg.Value.String()); err == nil {
-								capVal = capConstVal
-							}
-						}
-					}
-
-					bounds := BoundInfo{
-						safeLen:    uint(lenVal), // Actual length of the slice
-						safeCap:    uint(capVal), // Actual capacity of the slice
-						isLenExact: true,
-						isCapExact: true,
-					}
-					scope.safeBounds[instr] = bounds
-					debugf("MakeSlice bounds set: instr=%v, bounds=%+v", instr, bounds)
-				}
+			if bounds, err := processMakeSliceInstruction(instr); err == nil {
+				scope.safeBounds[instr] = bounds
+				debugf("MakeSlice bounds set: instr=%v, bounds=%+v", instr, bounds)
 			}
 
 		case *ssa.IndexAddr, *ssa.Slice:
@@ -889,4 +838,79 @@ func runSliceBoundsWithClosures(pass *analysis.Pass) (interface{}, error) {
 		return filteredErrors, nil
 	}
 	return nil, nil
+}
+
+// processMakeSliceAlloc processes an *ssa.Alloc instruction that represents a make() slice operation
+// and returns the BoundInfo for the slice. This function is extracted for better testability.
+func processMakeSliceAlloc(alloc *ssa.Alloc) (BoundInfo, error) {
+	capacity, err := extractSliceCapFromAlloc(alloc)
+	if err != nil {
+		return BoundInfo{}, err
+	}
+
+	// For make() slices, we need to determine the actual length vs capacity
+	// Check for referrers to find the corresponding slice operation from make()
+	actualLen := uint(capacity) // Default to capacity if no slice operation found
+	actualCap := uint(capacity)
+
+	if refs := alloc.Referrers(); refs != nil {
+		for _, user := range *refs {
+			if slice, ok := user.(*ssa.Slice); ok {
+				// This slice operation represents the initialization from make()
+				// For make([]T, len, cap), the initialization slice is t0[:len:cap]
+				// The High field contains the actual length
+				if slice.High != nil {
+					if highConst, ok := slice.High.(*ssa.Const); ok {
+						if lenVal, err := strconv.Atoi(highConst.Value.String()); err == nil {
+							actualLen = uint(lenVal)
+							break
+						}
+					}
+				} else if slice.Low == nil {
+					// Case: slice t0[:] - this means full slice, length = capacity
+					actualLen = actualCap
+					break
+				}
+			}
+		}
+	}
+
+	return BoundInfo{
+		safeLen:    actualLen,
+		safeCap:    actualCap,
+		isLenExact: true,
+		isCapExact: true,
+	}, nil
+}
+
+// processMakeSliceInstruction processes a *ssa.MakeSlice instruction and returns the BoundInfo
+// This function is extracted for better testability.
+func processMakeSliceInstruction(makeSlice *ssa.MakeSlice) (BoundInfo, error) {
+	lenArg, ok := makeSlice.Len.(*ssa.Const)
+	if !ok {
+		return BoundInfo{}, errors.New("make slice length is not a constant")
+	}
+
+	lenVal, err := strconv.Atoi(lenArg.Value.String())
+	if err != nil {
+		return BoundInfo{}, fmt.Errorf("failed to parse make slice length: %w", err)
+	}
+
+	capVal := lenVal // Default capacity equals length
+
+	// Check if capacity is explicitly provided
+	if makeSlice.Cap != nil {
+		if capArg, ok := makeSlice.Cap.(*ssa.Const); ok {
+			if capConstVal, err := strconv.Atoi(capArg.Value.String()); err == nil {
+				capVal = capConstVal
+			}
+		}
+	}
+
+	return BoundInfo{
+		safeLen:    uint(lenVal), // Actual length of the slice
+		safeCap:    uint(capVal), // Actual capacity of the slice
+		isLenExact: true,
+		isCapExact: true,
+	}, nil
 }
