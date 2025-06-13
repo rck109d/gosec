@@ -33,9 +33,13 @@ import (
 type bound int
 
 const (
-	lowerUnbounded bound = iota
+	// unbounded (zero value), no bounds information
+	unbounded bound = iota
+	// lowerUnbounded: len > N
+	lowerUnbounded
+	// upperUnbounded: len < N
 	upperUnbounded
-	unbounded
+	// upperBounded: len = N
 	upperBounded
 )
 
@@ -64,14 +68,82 @@ func newSliceBoundsAnalyzer(id string, description string) *analysis.Analyzer {
 }
 
 func runSliceBounds(pass *analysis.Pass) (interface{}, error) {
-	return runSliceBoundsWithClosures(pass)
+	debugf("=== SLICE BOUNDS ANALYZER STARTED ===")
+	ssaResult, err := getSSAResult(pass)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := &ScopeContext{
+		pass:     pass,
+		analyzer: pass.Analyzer,
+	}
+
+	allErrors := []*issue.Issue{}
+
+	for _, fn := range ssaResult.SSA.SrcFuncs {
+		// Create function scope
+		fnScope := ctx.WithScope(nil, func(scope *SliceScopeState) {
+			// Add function parameters as bounds sources
+			for _, param := range fn.Params {
+				if isSliceType(param.Type()) {
+					bounds := BoundInfo{
+						safeLen:    0, // No indices are safe by default for parameters
+						safeCap:    0, // No capacity known by default for parameters
+						isLenExact: false,
+						isCapExact: false,
+					}
+					scope.safeBounds[param] = bounds
+				}
+			}
+
+			// Process function blocks starting from entry block
+			// Use a global visited map to avoid processing blocks multiple times
+			globalVisited := make(map[*ssa.BasicBlock]bool)
+			if len(fn.Blocks) > 0 {
+				ctx.processBlockWithScopeRecursive(scope, fn.Blocks[0], globalVisited)
+			}
+		})
+
+		// Clear internal instruction pointers before adding to final result
+		// Collect errors by file and line to avoid duplicates
+		errMap := make(map[string]bool)
+		for _, err := range fnScope.errors {
+			key := fmt.Sprintf("%s:%s:%s", err.File, err.Line, err.What)
+			if !errMap[key] {
+				errMap[key] = true
+				err.Autofix = ""
+				allErrors = append(allErrors, err)
+			}
+		}
+	}
+
+	// The test expects only actual slice access errors, not setup errors
+	// Filter so we only report slice bounds errors and not slice allocation errors
+	filteredErrors := []*issue.Issue{}
+
+	// Keep a map to track unique errors by file and line number
+	uniqueErrors := make(map[string]bool)
+
+	for _, err := range allErrors {
+		if err.What == "slice bounds out of range" || err.What == "slice index out of range" {
+			key := fmt.Sprintf("%s:%s", err.File, err.Line)
+			if !uniqueErrors[key] {
+				uniqueErrors[key] = true
+				filteredErrors = append(filteredErrors, err)
+			}
+		}
+	}
+
+	if len(filteredErrors) > 0 {
+		return filteredErrors, nil
+	}
+	return nil, nil
 }
 
 func (b bound) inverse() bound {
-	if inv, ok := boundInverse[b]; ok {
-		return inv
-	}
-	return unbounded
+	// entries not in map will return zero value: unbounded
+	return boundInverse[b]
 }
 
 func extractSliceBounds(slice *ssa.Slice) (int, int) {
@@ -570,16 +642,18 @@ func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value
 							boundType = upperUnbounded // len(s) < N
 						case token.LEQ:
 							boundType = upperUnbounded // len(s) <= N
-							value = value + 1          // Adjust for <= vs <
+							value = value + 1          // len(s) < N + 1
 						case token.GTR:
 							boundType = lowerUnbounded // len(s) > N
 						case token.GEQ:
 							boundType = lowerUnbounded // len(s) >= N
-							value = value - 1          // Adjust for >= vs >
+							value = value - 1          // len(s) > N - 1
 						case token.EQL:
 							boundType = upperBounded // len(s) == N
 						case token.NEQ:
 							boundType = unbounded // len(s) != N
+						default:
+							return nil, unbounded, 0, fmt.Errorf("unhandled condition.Op %v", condition.Op)
 						}
 						return sliceParam, boundType, value, nil
 					}
@@ -611,6 +685,8 @@ func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value
 							boundType = upperBounded // N == len(s)
 						case token.NEQ:
 							boundType = unbounded // N != len(s)
+						default:
+							return nil, unbounded, 0, fmt.Errorf("unhandled condition.Op %v", condition.Op)
 						}
 						return sliceParam, boundType, value, nil
 					}
@@ -619,7 +695,7 @@ func (ctx *ScopeContext) extractLengthCondition(condition *ssa.BinOp) (ssa.Value
 		}
 	}
 
-	return nil, lowerUnbounded, 0, fmt.Errorf("no length condition found")
+	return nil, unbounded, 0, fmt.Errorf("no length condition found")
 }
 
 // processBlockWithScopeRecursive processes a basic block with visited tracking to prevent infinite loops
@@ -756,81 +832,6 @@ func (ctx *ScopeContext) mergeErrors(parentScope *SliceScopeState, trueScope *Sl
 			seenErrors[key] = true
 		}
 	}
-}
-
-// runSliceBoundsWithClosures implements the closure-based approach
-func runSliceBoundsWithClosures(pass *analysis.Pass) (interface{}, error) {
-	debugf("=== SLICE BOUNDS ANALYZER STARTED ===")
-	ssaResult, err := getSSAResult(pass)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx := &ScopeContext{
-		pass:     pass,
-		analyzer: pass.Analyzer,
-	}
-
-	allErrors := []*issue.Issue{}
-
-	for _, fn := range ssaResult.SSA.SrcFuncs {
-		// Create function scope
-		fnScope := ctx.WithScope(nil, func(scope *SliceScopeState) {
-			// Add function parameters as bounds sources
-			for _, param := range fn.Params {
-				if isSliceType(param.Type()) {
-					bounds := BoundInfo{
-						safeLen:    0, // No indices are safe by default for parameters
-						safeCap:    0, // No capacity known by default for parameters
-						isLenExact: false,
-						isCapExact: false,
-					}
-					scope.safeBounds[param] = bounds
-				}
-			}
-
-			// Process function blocks starting from entry block
-			// Use a global visited map to avoid processing blocks multiple times
-			globalVisited := make(map[*ssa.BasicBlock]bool)
-			if len(fn.Blocks) > 0 {
-				ctx.processBlockWithScopeRecursive(scope, fn.Blocks[0], globalVisited)
-			}
-		})
-
-		// Clear internal instruction pointers before adding to final result
-		// Collect errors by file and line to avoid duplicates
-		errMap := make(map[string]bool)
-		for _, err := range fnScope.errors {
-			key := fmt.Sprintf("%s:%s:%s", err.File, err.Line, err.What)
-			if !errMap[key] {
-				errMap[key] = true
-				err.Autofix = ""
-				allErrors = append(allErrors, err)
-			}
-		}
-	}
-
-	// The test expects only actual slice access errors, not setup errors
-	// Filter so we only report slice bounds errors and not slice allocation errors
-	filteredErrors := []*issue.Issue{}
-
-	// Keep a map to track unique errors by file and line number
-	uniqueErrors := make(map[string]bool)
-
-	for _, err := range allErrors {
-		if err.What == "slice bounds out of range" || err.What == "slice index out of range" {
-			key := fmt.Sprintf("%s:%s", err.File, err.Line)
-			if !uniqueErrors[key] {
-				uniqueErrors[key] = true
-				filteredErrors = append(filteredErrors, err)
-			}
-		}
-	}
-
-	if len(filteredErrors) > 0 {
-		return filteredErrors, nil
-	}
-	return nil, nil
 }
 
 // processMakeSliceAlloc processes an *ssa.Alloc instruction that represents a make() slice operation

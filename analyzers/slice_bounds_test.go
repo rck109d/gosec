@@ -837,7 +837,7 @@ func TestProcessMakeSliceAlloc(t *testing.T) {
 		errorMsg    string
 	}{
 		{
-			name: "make slice with length only - alloc processing",
+			name: "make slice with length only",
 			code: `
 package main
 func main() {
@@ -849,7 +849,7 @@ func main() {
 			expectError: false,
 		},
 		{
-			name: "make slice with length and capacity - alloc processing",
+			name: "make slice with length and capacity",
 			code: `
 package main
 func main() {
@@ -861,7 +861,7 @@ func main() {
 			expectError: false,
 		},
 		{
-			name: "make slice with zero length and capacity - alloc processing",
+			name: "make slice with zero length and capacity",
 			code: `
 package main
 func main() {
@@ -873,7 +873,7 @@ func main() {
 			expectError: false,
 		},
 		{
-			name: "make slice with zero length - alloc processing",
+			name: "make slice with zero length",
 			code: `
 package main
 func main() {
@@ -885,7 +885,7 @@ func main() {
 			expectError: false,
 		},
 		{
-			name: "make slice with large values - alloc processing",
+			name: "make slice with multi-digit values",
 			code: `
 package main
 func main() {
@@ -909,7 +909,7 @@ func main() {
 			expectError: false,
 		},
 		{
-			name: "non-slice alloc should error",
+			name: "new int should error",
 			code: `
 package main
 func main() {
@@ -994,50 +994,5 @@ func main() {
 				}
 			}
 		})
-	}
-}
-
-func TestMakeSliceProcessingIntegration(t *testing.T) {
-	// This test verifies that the critical case that was failing is now working
-	code := `
-package main
-func main() {
-	s := make([]byte, 0, 4)
-	_ = s[:3]
-	_ = s[3]
-}`
-
-	allocs, _, err := allocsAndSlicesFromCode(code)
-	if err != nil {
-		t.Fatalf("failed to create SSA: %v", err)
-	}
-
-	// Find the makeslice alloc
-	var makeSliceAlloc *ssa.Alloc
-	for _, alloc := range allocs {
-		if strings.Contains(alloc.String(), "makeslice") {
-			makeSliceAlloc = alloc
-			break
-		}
-	}
-
-	if makeSliceAlloc == nil {
-		t.Fatalf("no makeslice alloc found in SSA")
-	}
-
-	bounds, err := processMakeSliceAlloc(makeSliceAlloc)
-	if err != nil {
-		t.Fatalf("failed to process make slice alloc: %v", err)
-	}
-
-	// Verify the critical fix: length should be 0, capacity should be 4
-	if bounds.safeLen != 0 {
-		t.Errorf("expected length 0, got %d", bounds.safeLen)
-	}
-	if bounds.safeCap != 4 {
-		t.Errorf("expected capacity 4, got %d", bounds.safeCap)
-	}
-	if !bounds.isLenExact || !bounds.isCapExact {
-		t.Errorf("expected both length and capacity to be exact")
 	}
 }
