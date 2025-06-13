@@ -1243,4 +1243,506 @@ func main() {
 	fmt.Println(s[3]) // out of bounds
 }
 `}, 1, gosec.NewConfig()},
+	// 3-index slice operations - systematic test matrix
+	// Case 1: primitive, low=0, low<high, high<max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:2:8]) // valid: all bounds respected
+}
+`}, 0, gosec.NewConfig()},
+	// Case 2: primitive, low=0, low<high, high<max, max=cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:2:10]) // valid: max=cap
+}
+`}, 0, gosec.NewConfig()},
+	// Case 3: primitive, low=0, low<high, high<max, max>cap, low<len, high<len - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:2:12]) // invalid: max>cap
+}
+`}, 1, gosec.NewConfig()},
+	// Case 4: primitive, low=0, low<high, high=max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:3:3]) // valid: high=max
+}
+`}, 0, gosec.NewConfig()},
+	// Case 5: primitive, low=0, low<high, high=max, max=cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:4:4]) // valid: high=max, within bounds
+}
+`}, 0, gosec.NewConfig()},
+	// Case 6: primitive, low=0, low<high, high<len, max>cap, low<len - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:4:12]) // invalid: max>cap
+}
+`}, 1, gosec.NewConfig()},
+	// Case 7: primitive, low=0, low=high, high<max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:0:5]) // valid: empty slice, low=high
+}
+`}, 0, gosec.NewConfig()},
+	// Case 8: primitive, low=0, low=high, high=max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[0:0:0]) // valid: all indices 0
+}
+`}, 0, gosec.NewConfig()},
+	// Case 9: primitive, low>0, low<high, high<max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[1:3:7]) // valid: standard case
+}
+`}, 0, gosec.NewConfig()},
+	// Case 10: primitive, low>0, low<high, high=max, max=cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[2:4:4]) // valid: high=max
+}
+`}, 0, gosec.NewConfig()},
+	// Case 11: primitive, low>0, low=high, high<max, max<cap, low<len, high=len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[4:4:8]) // valid: empty slice at index 4
+}
+`}, 0, gosec.NewConfig()},
+	// Case 12: primitive, low>0, low<high, high>len, high<max, max<cap - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[2:8:9]) // invalid: high>len
+}
+`}, 1, gosec.NewConfig()},
+	// Case 13: primitive, low>0, low<high, high<len, high<max, max>cap, low<len - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[1:3:15]) // invalid: max>cap
+}
+`}, 1, gosec.NewConfig()},
+	// Case 14: primitive, low=len, low=high, high<max, max<cap - VALID (empty slice at end)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[6:6:8]) // valid: empty slice at end
+}
+`}, 0, gosec.NewConfig()},
+	// Case 15: primitive, low>len, low<high, high>len, high<max, max<cap - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[8:9:10]) // invalid: low>len, high>len
+}
+`}, 1, gosec.NewConfig()},
+	// Case 16: primitive, low>len, low<high, high>len, high<max, max<cap - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[7:8:9]) // invalid: low>len, high>len
+}
+`}, 1, gosec.NewConfig()},
+	// Case 17: primitive, low<high, high=len, high<max, max<cap - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6, 10)
+	fmt.Println(s[2:6:8]) // valid: high=len
+}
+`}, 0, gosec.NewConfig()},
+	// Case 18: named type, low=0, low<high, high<max, max<cap, low<len, high<len - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 6, 10)
+	fmt.Println(s[0:3:7]) // valid: named type
+}
+`}, 0, gosec.NewConfig()},
+	// Case 19: named type, low>0, low<high, high<max, max>cap, low<len, high<len - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 6, 10)
+	fmt.Println(s[1:4:15]) // invalid: max>cap on named type
+}
+`}, 1, gosec.NewConfig()},
+	// Case 20: zero-length slice, low=0, low=high, high<max, max<cap - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0, 10)
+	fmt.Println(s[0:0:5]) // valid: empty slice operations
+}
+`}, 0, gosec.NewConfig()},
+	// Case 21: zero-length slice, low>0, low<high, high<max, max<cap - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0, 10)
+	fmt.Println(s[1:2:5]) // invalid: low>len on zero-length slice
+}
+`}, 1, gosec.NewConfig()},
+	// Case 22: len=cap, low<high, high<max, max>cap - INVALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[1:4:10]) // invalid: max>cap when len=cap
+}
+`}, 1, gosec.NewConfig()},
+	// Case 23: len=cap, low<high, high=len, high<max, max=cap - VALID
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[2:8:8]) // valid: high=len=cap, max=cap
+}
+`}, 0, gosec.NewConfig()},
+	// 1-index slice operations - valid start-only slice within bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[5:]) // valid: start=5 < length=8
+}
+`}, 0, gosec.NewConfig()},
+	// 1-index slice operations - invalid start-only slice out of bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[10:]) // invalid: start=10 > length=8
+}
+`}, 1, gosec.NewConfig()},
+	// 1-index slice operations - valid end-only slice within bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[:6]) // valid: end=6 <= length=8
+}
+`}, 0, gosec.NewConfig()},
+	// 1-index slice operations - invalid end-only slice out of bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[:12]) // invalid: end=12 > length=8
+}
+`}, 1, gosec.NewConfig()},
+	// 1-index slice operations - edge case at boundary
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[8:]) // valid: start=8 == length=8 (empty slice)
+}
+`}, 0, gosec.NewConfig()},
+	// 1-index slice operations - edge case at boundary for end
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[:8]) // valid: end=8 == length=8
+}
+`}, 0, gosec.NewConfig()},
+	// Same-index slice operations - valid same indices within bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[3:3]) // valid: empty slice at index 3
+}
+`}, 0, gosec.NewConfig()},
+	// Same-index slice operations - invalid same indices out of bounds
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[10:10]) // invalid: both indices=10 > length=8
+}
+`}, 1, gosec.NewConfig()},
+	// Same-index slice operations - valid at boundary
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[8:8]) // valid: empty slice at end
+}
+`}, 0, gosec.NewConfig()},
+	// Same-index slice operations - valid at start
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 8)
+	fmt.Println(s[0:0]) // valid: empty slice at start
+}
+`}, 0, gosec.NewConfig()},
+
+	// 1-index slice operations with zero-length slice - valid
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0, 5)
+	fmt.Println(s[0:]) // valid: start=0 == length=0
+}
+`}, 0, gosec.NewConfig()},
+	// 1-index slice operations with zero-length slice - invalid
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0, 5)
+	fmt.Println(s[1:]) // invalid: start=1 > length=0
+}
+`}, 1, gosec.NewConfig()},
+
+	// Function parameter with 3-index slice operations - unguarded
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5, 10)
+	processSlice(s)
+}
+
+func processSlice(s []int) {
+	fmt.Println(s[1:3:8]) // potentially unsafe without capacity check
+}
+`}, 1, gosec.NewConfig()},
+	// Function parameter with 3-index slice operations - capacity check not recognized
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5, 10)
+	processSlice(s)
+}
+
+func processSlice(s []int) {
+	if cap(s) >= 8 {
+		fmt.Println(s[1:3:8]) // analyzer doesn't recognize capacity bounds for 3-index slices
+	}
+}
+`}, 1, gosec.NewConfig()},
+	// Full slice operations [:] - valid on regular slice
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5)
+	fmt.Println(s[:]) // valid: full slice, equivalent to s[0:len(s)]
+}
+`}, 0, gosec.NewConfig()},
+	// Full slice operations [:] - valid on zero-length slice
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 0)
+	fmt.Println(s[:]) // valid: full slice of empty slice
+}
+`}, 0, gosec.NewConfig()},
+	// Full slice operations [:] - valid on slice with capacity
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 3, 10)
+	fmt.Println(s[:]) // valid: full slice respects length, not capacity
+}
+`}, 0, gosec.NewConfig()},
+	// Full slice operations [:] - flagged on function parameter (conservative)
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 5)
+	processSlice(s)
+}
+
+func processSlice(s []int) {
+	copy := s[:] // analyzer is conservative about function parameters
+	fmt.Println(copy)
+}
+`}, 1, gosec.NewConfig()},
+	// Full slice operations [:] - valid on named slice type
+	{[]string{`
+package main
+
+import "fmt"
+
+type MySlice []int
+
+func main() {
+	var s MySlice = make([]int, 4)
+	fmt.Println(s[:]) // valid: full slice on named type
+}
+`}, 0, gosec.NewConfig()},
+	// Full slice operations [:] - valid in slice assignment
+	{[]string{`
+package main
+
+import "fmt"
+
+func main() {
+	s := make([]int, 6)
+	s[0] = 1
+	s[5] = 6
+	
+	// Create a copy using full slice
+	copy := s[:]
+	fmt.Println(copy)
+}
+`}, 0, gosec.NewConfig()},
 }
